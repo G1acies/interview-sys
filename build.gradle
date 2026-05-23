@@ -1,0 +1,122 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.0.6'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'interview.guide'
+version = '0.0.1-SNAPSHOT'
+
+repositories {
+    maven { url 'https://maven.aliyun.com/repository/public/' }
+    maven { url 'https://maven.aliyun.com/repository/spring/' }
+    maven { url 'https://maven.aliyun.com/repository/gradle-plugin/' }
+    maven { url 'https://repo.spring.io/milestone' }
+    mavenCentral()
+}
+
+dependencies {
+    // Spring Boot Starters
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
+
+    // PostgreSQL
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // H2 for testing
+    testRuntimeOnly 'com.h2database:h2'
+
+    // Spring AI 2.0 - OpenAI 兼容模式 (DashScope、DeepSeek 等)
+    implementation platform('org.springaicommunity:spring-ai-agent-utils-bom:0.7.0')
+    implementation 'org.springframework.ai:spring-ai-starter-model-openai:2.0.0-M4'
+    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector:2.0.0-M4'
+    implementation 'org.springaicommunity:spring-ai-agent-utils'
+
+    // Apache Tika - 文档解析 (PDF、DOCX、TXT)
+    implementation 'org.apache.tika:tika-core:2.9.2'
+    implementation 'org.apache.tika:tika-parsers-standard-package:2.9.2'
+
+    // AWS S3 SDK - S3 兼容对象存储
+    implementation 'software.amazon.awssdk:s3:2.29.51'
+
+    // Pinyin4j - 汉字转拼音
+    implementation 'com.belerweb:pinyin4j:2.5.0'
+
+    // SpringDoc OpenAPI - Swagger 接口文档
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.2'
+
+    // Redisson - Redis 客户端
+    implementation 'org.redisson:redisson-spring-boot-starter:4.0.0'
+
+    // iText 8 - PDF 导出
+    implementation 'com.itextpdf:itext-core:8.0.5'
+    implementation 'com.itextpdf:font-asian:8.0.5'
+
+    // DashScope SDK - Qwen3 ASR/TTS
+    implementation('com.alibaba:dashscope-sdk-java:2.22.7') {
+        exclude group: 'org.slf4j', module: 'slf4j-simple'
+    }
+
+    // Jakarta annotation
+    implementation 'jakarta.annotation:jakarta.annotation-api:2.1.1'
+
+    // Lombok
+    compileOnly 'org.projectlombok:lombok:1.18.36'
+    annotationProcessor 'org.projectlombok:lombok:1.18.36'
+
+    // MapStruct - 对象映射
+    implementation 'org.mapstruct:mapstruct:1.6.3'
+    annotationProcessor 'org.mapstruct:mapstruct-processor:1.6.3'
+    annotationProcessor 'org.projectlombok:lombok-mapstruct-binding:0.2.0'
+
+    // Testing
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.12.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+// 全局 UTF-8 编码配置
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// 将项目根目录 .env 注入 bootRun
+tasks.named('bootRun') {
+    jvmArgs = [
+        '-Dfile.encoding=UTF-8',
+        '-Dstdout.encoding=UTF-8',
+        '-Dstderr.encoding=UTF-8'
+    ]
+
+    def envFile = rootProject.file('.env')
+    if (envFile.exists()) {
+        envFile.eachLine { line ->
+            def trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith('#')) {
+                return
+            }
+            def eq = trimmed.indexOf('=')
+            if (eq <= 0) {
+                return
+            }
+            def key = trimmed.substring(0, eq).trim()
+            def val = trimmed.substring(eq + 1).trim()
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                val = val.substring(1, val.length() - 1)
+            }
+            environment key, val
+        }
+    }
+}
