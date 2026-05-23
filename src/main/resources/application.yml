@@ -1,0 +1,57 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: interview-learn
+
+  # 虚拟线程
+  threads:
+    virtual:
+      enabled: true
+
+  # 数据源（开发阶段用 H2 内存数据库，后续切 PostgreSQL）
+  datasource:
+    url: jdbc:h2:mem:interview_learn;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+    database-platform: org.hibernate.dialect.H2Dialect
+
+  # 文件上传
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 50MB
+
+# CORS 跨域
+app:
+  cors:
+    allowed-origins: http://localhost:5173
+  interview:
+    follow-up-count: ${APP_INTERVIEW_FOLLOW_UP_COUNT:1}
+    evaluation-batch-size: ${APP_INTERVIEW_EVALUATION_BATCH_SIZE:8}
+  resume:
+    allowed-types:
+      - application/pdf
+      - application/msword
+      - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+      - text/plain
+  storage:
+    endpoint: ${APP_STORAGE_ENDPOINT:http://localhost:9000}
+    access-key: ${APP_STORAGE_ACCESS_KEY:minioadmin}
+    secret-key: ${APP_STORAGE_SECRET_KEY:minioadmin}
+    bucket: ${APP_STORAGE_BUCKET:interview-guide}
+    region: ${APP_STORAGE_REGION:us-east-1}
+
+logging:
+  level:
+    interview.guide: DEBUG

@@ -25,39 +25,32 @@ dependencies {
     // PostgreSQL
     runtimeOnly 'org.postgresql:postgresql'
 
-    // H2 for testing
-    testRuntimeOnly 'com.h2database:h2'
+    // H2 内存数据库（开发阶段临时使用）
+    runtimeOnly 'com.h2database:h2'
 
-    // Spring AI 2.0 - OpenAI 兼容模式 (DashScope、DeepSeek 等)
-    implementation platform('org.springaicommunity:spring-ai-agent-utils-bom:0.7.0')
-    implementation 'org.springframework.ai:spring-ai-starter-model-openai:2.0.0-M4'
-    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector:2.0.0-M4'
-    implementation 'org.springaicommunity:spring-ai-agent-utils'
+    // ========== 以下依赖按需逐步引入 ==========
 
-    // Apache Tika - 文档解析 (PDF、DOCX、TXT)
-    implementation 'org.apache.tika:tika-core:2.9.2'
-    implementation 'org.apache.tika:tika-parsers-standard-package:2.9.2'
+    // Spring AI 2.0 — TODO: 知识库阶段引入
+    // implementation platform('org.springaicommunity:spring-ai-agent-utils-bom:0.7.0')
+    // implementation 'org.springframework.ai:spring-ai-starter-model-openai:2.0.0-M4'
+    // implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector:2.0.0-M4'
 
-    // AWS S3 SDK - S3 兼容对象存储
+    // Apache Tika — TODO: 简历/知识库阶段引入
+    // implementation 'org.apache.tika:tika-core:2.9.2'
+    // implementation 'org.apache.tika:tika-parsers-standard-package:2.9.2'
+
+    // AWS S3 SDK
     implementation 'software.amazon.awssdk:s3:2.29.51'
 
-    // Pinyin4j - 汉字转拼音
-    implementation 'com.belerweb:pinyin4j:2.5.0'
+    // Redisson — TODO: Redis 缓存和限流阶段引入
+    // implementation 'org.redisson:redisson-spring-boot-starter:4.0.0'
 
-    // SpringDoc OpenAPI - Swagger 接口文档
-    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.2'
+    // iText 8 — TODO: PDF 导出阶段引入
+    // implementation 'com.itextpdf:itext-core:8.0.5'
+    // implementation 'com.itextpdf:font-asian:8.0.5'
 
-    // Redisson - Redis 客户端
-    implementation 'org.redisson:redisson-spring-boot-starter:4.0.0'
-
-    // iText 8 - PDF 导出
-    implementation 'com.itextpdf:itext-core:8.0.5'
-    implementation 'com.itextpdf:font-asian:8.0.5'
-
-    // DashScope SDK - Qwen3 ASR/TTS
-    implementation('com.alibaba:dashscope-sdk-java:2.22.7') {
-        exclude group: 'org.slf4j', module: 'slf4j-simple'
-    }
+    // DashScope SDK — TODO: 语音面试阶段引入
+    // implementation('com.alibaba:dashscope-sdk-java:2.22.7') { exclude group: 'org.slf4j', module: 'slf4j-simple' }
 
     // Jakarta annotation
     implementation 'jakarta.annotation:jakarta.annotation-api:2.1.1'
