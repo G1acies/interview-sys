@@ -43,8 +43,36 @@ public class ResumeService {
                 .updatedAt(java.time.LocalDateTime.now())
                 .build();
         ResumeEntity saved = resumeRepository.save(entity);
-        log.info("Resume created: id={}, fileName={}", saved.getId(), fileName);
+        log.info("简历记录已创建: id={}, fileName={}", saved.getId(), fileName);
         return saved;
+    }
+
+    /**
+     * 保存解析后的文本内容，将状态更新为 COMPLETED。
+     * 如果解析失败，调用方应传入 null 或空文本，状态设为 FAILED。
+     */
+    @Transactional
+    public void saveParsedContent(Long id, String rawText) {
+        ResumeEntity entity = getById(id);
+        entity.setRawText(rawText);
+        entity.setStatus(rawText != null && !rawText.isBlank() ? "PARSED" : "FAILED");
+        entity.setUpdatedAt(java.time.LocalDateTime.now());
+        resumeRepository.save(entity);
+        log.info("简历解析完成: id={}, 文本长度={}, 状态={}", id,
+                rawText != null ? rawText.length() : 0, entity.getStatus());
+    }
+
+    /**
+     * 保存 AI 分析结果（JSON），状态更新为 COMPLETED。
+     */
+    @Transactional
+    public void saveAnalysisResult(Long id, String analysisJson) {
+        ResumeEntity entity = getById(id);
+        entity.setAnalysisResult(analysisJson);
+        entity.setStatus(analysisJson != null ? "COMPLETED" : "FAILED");
+        entity.setUpdatedAt(java.time.LocalDateTime.now());
+        resumeRepository.save(entity);
+        log.info("AI 简历分析完成: id={}, 状态={}", id, entity.getStatus());
     }
 
     @Transactional

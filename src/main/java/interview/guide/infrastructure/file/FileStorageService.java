@@ -50,7 +50,12 @@ public class FileStorageService {
      */
     @PostConstruct
     public void init() {
-        ensureBucketExists();
+        try {
+            ensureBucketExists();
+        } catch (Exception e) {
+            // S3 服务（MinIO）不可用时不阻断启动，上传时再报错
+            log.warn("S3 存储服务不可用，文件上传功能将受限: {}", e.getMessage());
+        }
     }
 
     // ==================== 公开 API ====================

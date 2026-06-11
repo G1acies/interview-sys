@@ -10,12 +10,12 @@ spring:
     virtual:
       enabled: true
 
-  # 数据源（开发阶段用 H2 内存数据库，后续切 PostgreSQL）
+  # 数据源（PostgreSQL）
   datasource:
-    url: jdbc:h2:mem:interview_learn;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
-    username: sa
-    password:
-    driver-class-name: org.h2.Driver
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:interview_learn}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:123456}
+    driver-class-name: org.postgresql.Driver
 
   jpa:
     hibernate:
@@ -24,13 +24,22 @@ spring:
     properties:
       hibernate:
         format_sql: true
-    database-platform: org.hibernate.dialect.H2Dialect
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
 
   # 文件上传
   servlet:
     multipart:
       max-file-size: 20MB
       max-request-size: 50MB
+
+  # Spring AI — DashScope (OpenAI 兼容)
+  ai:
+    openai:
+      api-key: ${AI_BAILIAN_API_KEY:***REMOVED***}
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      chat:
+        options:
+          model: ${AI_MODEL:qwen3.7-max}
 
 # CORS 跨域
 app:

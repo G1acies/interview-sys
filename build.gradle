@@ -30,14 +30,14 @@ dependencies {
 
     // ========== 以下依赖按需逐步引入 ==========
 
-    // Spring AI 2.0 — TODO: 知识库阶段引入
-    // implementation platform('org.springaicommunity:spring-ai-agent-utils-bom:0.7.0')
-    // implementation 'org.springframework.ai:spring-ai-starter-model-openai:2.0.0-M4'
+    // Spring AI 2.0
+    implementation platform('org.springaicommunity:spring-ai-agent-utils-bom:0.7.0')
+    implementation 'org.springframework.ai:spring-ai-starter-model-openai:2.0.0-M4'
     // implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector:2.0.0-M4'
 
-    // Apache Tika — TODO: 简历/知识库阶段引入
-    // implementation 'org.apache.tika:tika-core:2.9.2'
-    // implementation 'org.apache.tika:tika-parsers-standard-package:2.9.2'
+    // Apache Tika — 文档解析（PDF/DOCX/TXT → 纯文本）
+    implementation 'org.apache.tika:tika-core:2.9.2'
+    implementation 'org.apache.tika:tika-parsers-standard-package:2.9.2'
 
     // AWS S3 SDK
     implementation 'software.amazon.awssdk:s3:2.29.51'
