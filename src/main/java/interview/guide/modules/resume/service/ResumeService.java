@@ -3,7 +3,6 @@ package interview.guide.modules.resume.service;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.modules.resume.model.ResumeEntity;
-import interview.guide.modules.resume.model.ResumeListItemDTO;
 import interview.guide.modules.resume.repository.ResumeRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,11 +19,8 @@ public class ResumeService {
     private final ResumeRepository resumeRepository;
 
     @Transactional(readOnly = true)
-    public List<ResumeListItemDTO> listAll() {
-        return resumeRepository.findAll()
-                .stream()
-                .map(e -> new ResumeListItemDTO(e.getId(), e.getFileName(), e.getStatus(), e.getCreatedAt()))
-                .toList();
+    public List<ResumeEntity> listAll() {
+        return resumeRepository.findAll();
     }
 
     @Transactional(readOnly = true)
@@ -34,16 +30,18 @@ public class ResumeService {
     }
 
     @Transactional
-    public ResumeEntity create(String fileName, String fileUrl) {
+    public ResumeEntity create(String fileName, String fileUrl, Long fileSize, String contentType) {
         ResumeEntity entity = ResumeEntity.builder()
                 .fileName(fileName)
                 .fileUrl(fileUrl)
+                .fileSize(fileSize)
+                .contentType(contentType)
                 .status("PENDING")
                 .createdAt(java.time.LocalDateTime.now())
                 .updatedAt(java.time.LocalDateTime.now())
                 .build();
         ResumeEntity saved = resumeRepository.save(entity);
-        log.info("简历记录已创建: id={}, fileName={}", saved.getId(), fileName);
+        log.info("简历记录已创建: id={}, fileName={}, fileSize={}", saved.getId(), fileName, fileSize);
         return saved;
     }
 
@@ -80,5 +78,11 @@ public class ResumeService {
         ResumeEntity entity = getById(id);
         resumeRepository.delete(entity);
         log.info("Resume deleted: id={}", id);
+    }
+
+
+    @Transactional(readOnly = true)
+    public ResumeEntity getDetailById(Long id) {
+        return getById(id);
     }
 }

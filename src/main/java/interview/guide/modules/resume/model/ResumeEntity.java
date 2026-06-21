@@ -28,15 +28,19 @@ public class ResumeEntity {
 
     private String fileUrl;
 
-    private String status; // PENDING → PARSING → COMPLETED / FAILED
+    /** 文件大小（字节） */
+    private Long fileSize;
+
+    /** MIME 类型，如 application/pdf */
+    private String contentType;
+
+    private String status; // PENDING → PARSED → COMPLETED / FAILED
 
     /** Tika 解析出的纯文本内容，供后续 AI 分析使用 */
-    @jakarta.persistence.Lob
     @jakarta.persistence.Column(columnDefinition = "TEXT")
     private String rawText;
 
     /** AI 分析的结构化结果（JSON） */
-    @jakarta.persistence.Lob
     @jakarta.persistence.Column(columnDefinition = "TEXT")
     private String analysisResult;
 

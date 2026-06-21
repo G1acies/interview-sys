@@ -5,7 +5,6 @@ import interview.guide.infrastructure.file.DocumentParseService;
 import interview.guide.infrastructure.file.FileStorageService;
 import interview.guide.infrastructure.file.FileValidationService;
 import interview.guide.modules.resume.model.ResumeEntity;
-import interview.guide.modules.resume.model.ResumeListItemDTO;
 import interview.guide.modules.resume.service.ResumeAnalysisService;
 import interview.guide.modules.resume.service.ResumeService;
 import lombok.RequiredArgsConstructor;
@@ -19,12 +18,11 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.Collections;
 import java.util.List;
 
 /**
  * 简历管理 REST 接口。
- * <p>
- * 提供简历的增删查以及文件上传 + 解析能力。
  */
 @Slf4j
 @RestController
@@ -38,30 +36,62 @@ public class ResumeController {
     private final DocumentParseService documentParseService;
     private final ResumeAnalysisService resumeAnalysisService;
 
-    /** 健康检查 */
+    // 给前端的列表项
+    public record ResumeListItem(
+            Long id,
+            String filename,
+            Long fileSize,
+            String uploadedAt,
+            int accessCount,
+            Integer latestScore,
+            String lastAnalyzedAt,
+            int interviewCount,
+            String analyzeStatus,
+            String analyzeError,
+            String storageUrl
+    ) {}
+
+    // 上传响应
+    public record UploadStorageInfo(String fileKey, String fileUrl, Long resumeId) {}
+    public record UploadResponse(UploadStorageInfo storage) {}
+
+    // 详情响应
+    public record ResumeDetail(
+            Long id, String filename, Long fileSize, String contentType,
+            String storageUrl, String uploadedAt, int accessCount,
+            String resumeText, String analyzeStatus, String analyzeError,
+            List<AnalysisItem> analyses, List<InterviewItem> interviews
+    ) {}
+    public record AnalysisItem(
+            Long id, int overallScore, int contentScore, int structureScore,
+            int skillMatchScore, int expressionScore, int projectScore,
+            String summary, String analyzedAt, List<String> strengths,
+            List<Object> suggestions
+    ) {}
+    public record InterviewItem(
+            Long id, String sessionId, int totalQuestions, String status,
+            String evaluateStatus, String evaluateError, Integer overallScore,
+            String overallFeedback, String createdAt, String completedAt
+    ) {}
+
     @GetMapping("/health")
     public Result<?> health() {
         return Result.success("ok");
     }
 
-    /** 获取简历列表 */
-    @GetMapping("/list")
-    public Result<List<ResumeListItemDTO>> list() {
-        return Result.success(resumeService.listAll());
+    /** 获取全部简历列表 — 前端 ResumeListItem 格式 */
+    @GetMapping
+    public Result<List<ResumeListItem>> list() {
+        List<ResumeListItem> items = resumeService.listAll().stream()
+                .map(this::toListItem)
+                .toList();
+        return Result.success(items);
     }
 
     /** 获取单条简历详情 */
     @GetMapping("/{id}")
     public Result<ResumeEntity> getById(@PathVariable Long id) {
         return Result.success(resumeService.getById(id));
-    }
-
-    /** 手动创建简历记录 */
-    @PostMapping("/create")
-    public Result<ResumeEntity> create(
-            @RequestParam String fileName,
-            @RequestParam String fileUrl) {
-        return Result.success(resumeService.create(fileName, fileUrl));
     }
 
     /** 删除简历记录 */
@@ -72,20 +102,10 @@ public class ResumeController {
     }
 
     /**
-     * 上传 + Tika 解析 + AI 分析简历文件。
-     *
-     * <h3>完整流程</h3>
-     * <ol>
-     *   <li><b>校验</b> — 检查文件非空、不超过 20MB</li>
-     *   <li><b>存储</b> — 上传到 MinIO，返回 fileKey</li>
-     *   <li><b>入库</b> — 创建简历记录（状态 PENDING）</li>
-     *   <li><b>Tika 解析</b> — 提取纯文本后保存（状态 PARSED）</li>
-     *   <li><b>AI 分析</b> — 调用大模型提取结构化信息（状态 COMPLETED）</li>
-     *   <li><b>返回</b> — 完整的简历实体</li>
-     * </ol>
+     * 上传 + Tika 解析 + AI 分析。
      */
     @PostMapping("/upload")
-    public Result<ResumeEntity> upload(@RequestParam("file") MultipartFile file) {
+    public Result<UploadResponse> upload(@RequestParam("file") MultipartFile file) {
         // 1. 校验
         fileValidationService.validateFile(file, 20 * 1024 * 1024, "简历");
 
@@ -93,29 +113,109 @@ public class ResumeController {
         String fileKey = fileStorageService.uploadResume(file);
         String fileUrl = fileStorageService.getFileUrl(fileKey);
 
-        // 3. 先入库（状态 PENDING），拿到 id
-        ResumeEntity entity = resumeService.create(file.getOriginalFilename(), fileUrl);
+        // 3. 入库（PENDING）
+        ResumeEntity entity = resumeService.create(
+                file.getOriginalFilename(), fileUrl, file.getSize(), file.getContentType());
 
-        // 4. Tika 解析文本内容
+        // 4. Tika 解析
         try {
             String rawText = documentParseService.parseContent(file);
             resumeService.saveParsedContent(entity.getId(), rawText);
             entity = resumeService.getById(entity.getId());
 
-            // 5. AI 分析 — 提取结构化信息
+            // 5. AI 分析
             try {
                 String analysisJson = resumeAnalysisService.analyzeToJson(rawText);
                 resumeService.saveAnalysisResult(entity.getId(), analysisJson);
                 entity = resumeService.getById(entity.getId());
             } catch (Exception e) {
-                log.warn("AI 简历分析失败，Tika 解析已保存: id={}, error={}", entity.getId(), e.getMessage());
+                log.warn("AI 简历分析失败: id={}, error={}", entity.getId(), e.getMessage());
             }
         } catch (Exception e) {
-            // Tika 解析失败，标记 FAILED
             resumeService.saveParsedContent(entity.getId(), null);
             entity = resumeService.getById(entity.getId());
         }
 
-        return Result.success(entity);
+        UploadStorageInfo storage = new UploadStorageInfo(fileKey, fileUrl, entity.getId());
+        return Result.success(new UploadResponse(storage));
+    }
+
+    /** Entity → 前端 ResumeListItem */
+    private ResumeListItem toListItem(ResumeEntity e) {
+        return new ResumeListItem(
+                e.getId(),
+                e.getFileName(),
+                e.getFileSize(),
+                e.getCreatedAt() != null ? e.getCreatedAt().toString() : null,
+                0,                          // accessCount
+                null,                       // latestScore
+                e.getUpdatedAt() != null ? e.getUpdatedAt().toString() : null,
+                0,                          // interviewCount
+                e.getStatus(),
+                null,                       // analyzeError
+                e.getFileUrl()
+        );
+    }
+
+    /** 获取简历详情 — 前端 ResumeDetail 格式 */
+    @GetMapping("/{id}/detail")
+    public Result<ResumeDetail> getDetailById(@PathVariable Long id) {
+        ResumeEntity e = resumeService.getDetailById(id);
+
+        // 从 analysisResult JSON 提取分析数据
+        List<AnalysisItem> analyses = buildAnalyses(e);
+        int latestScore = analyses.isEmpty() ? 0 : analyses.get(0).overallScore;
+
+        // 组装详情
+        ResumeDetail detail = new ResumeDetail(
+                e.getId(),
+                e.getFileName(),
+                e.getFileSize(),
+                e.getContentType(),
+                e.getFileUrl(),
+                e.getCreatedAt() != null ? e.getCreatedAt().toString() : null,
+                0,                                    // accessCount
+                e.getRawText(),
+                e.getStatus(),
+                null,                                 // analyzeError
+                analyses,
+                Collections.emptyList()               // interviews 暂为空
+        );
+
+        return Result.success(detail);
+    }
+
+    private List<AnalysisItem> buildAnalyses(ResumeEntity e) {
+        if (e.getAnalysisResult() == null || e.getAnalysisResult().isBlank()) {
+            return Collections.emptyList();
+        }
+        try {
+            // 从 JSON 提取技能数作为简易评分
+            var om = new tools.jackson.databind.ObjectMapper();
+            var node = om.readTree(e.getAnalysisResult());
+            int skillCount = node.has("skills") ? node.get("skills").size() : 0;
+            int expCount = node.has("experience") ? node.get("experience").size() : 0;
+            int eduCount = node.has("education") ? node.get("education").size() : 0;
+
+            int totalScore = Math.min(100, skillCount * 5 + expCount * 10 + eduCount * 10);
+
+            AnalysisItem item = new AnalysisItem(
+                    e.getId(),
+                    totalScore,
+                    Math.min(25, skillCount * 2),
+                    Math.min(20, expCount * 3),
+                    Math.min(25, skillCount * 2),
+                    Math.min(15, 10),
+                    Math.min(15, expCount * 3),
+                    "AI 分析完成",
+                    e.getUpdatedAt() != null ? e.getUpdatedAt().toString() : null,
+                    List.of(),
+                    List.of()
+            );
+            return List.of(item);
+        } catch (Exception ex) {
+            log.warn("解析 analysisResult JSON 失败: id={}, error={}", e.getId(), ex.getMessage());
+            return Collections.emptyList();
+        }
     }
 }

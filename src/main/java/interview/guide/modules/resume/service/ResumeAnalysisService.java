@@ -73,8 +73,11 @@ public class ResumeAnalysisService {
 
         log.debug("AI 分析原始响应: {}", response);
 
+        // 去掉 markdown 代码块标记（如 ```json ... ```）
+        String json = extractJson(response);
+
         try {
-            ResumeAnalysisResult result = objectMapper.readValue(response, ResumeAnalysisResult.class);
+            ResumeAnalysisResult result = objectMapper.readValue(json, ResumeAnalysisResult.class);
             log.info("AI 简历分析完成: 姓名={}, 技能数={}, 经历数={}, 教育数={}",
                     result.name(),
                     result.skills() != null ? result.skills().size() : 0,
@@ -85,6 +88,16 @@ public class ResumeAnalysisService {
             log.error("AI 分析结果解析失败: {}", e.getMessage());
             throw new BusinessException(ErrorCode.RESUME_ANALYSIS_FAILED, "AI 分析结果解析失败");
         }
+    }
+
+    /**
+     * 从 LLM 响应中提取纯 JSON，去掉 markdown 代码块标记。
+     */
+    private String extractJson(String raw) {
+        String s = raw.strip()
+                .replaceAll("^```(?:json)?\\s*\\n?", "")   // 去掉开头的 ```json
+                .replaceAll("\\n?```$", "");                // 去掉结尾的 ```
+        return s;
     }
 
     /**
