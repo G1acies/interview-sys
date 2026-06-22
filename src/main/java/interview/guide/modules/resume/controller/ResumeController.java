@@ -2,6 +2,7 @@ package interview.guide.modules.resume.controller;
 
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.result.Result;
+import interview.guide.infrastructure.export.PdfExportService;
 import interview.guide.infrastructure.file.DocumentParseService;
 import interview.guide.infrastructure.file.FileStorageService;
 import interview.guide.infrastructure.file.FileValidationService;
@@ -10,6 +11,9 @@ import interview.guide.modules.resume.service.ResumeAnalysisService;
 import interview.guide.modules.resume.service.ResumeService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,6 +23,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 
@@ -36,6 +42,7 @@ public class ResumeController {
     private final FileValidationService fileValidationService;
     private final DocumentParseService documentParseService;
     private final ResumeAnalysisService resumeAnalysisService;
+    private final PdfExportService pdfExportService;
 
     // 给前端的列表项
     public record ResumeListItem(
@@ -217,6 +224,42 @@ public class ResumeController {
         );
 
         return Result.success(detail);
+    }
+
+    /**
+     * 导出简历分析报告为 PDF。
+     *
+     * <h3>和普通 JSON 接口的区别</h3>
+     * <ul>
+     *   <li>返回二进制 {@code application/pdf}，不是 JSON</li>
+     *   <li>用 {@link ResponseEntity} 而非 {@link Result}，因为 Content-Type 不同</li>
+     *   <li>错误时返回 JSON + 500 状态码，不经过 GlobalExceptionHandler</li>
+     * </ul>
+     */
+    @GetMapping("/{resumeId}/export")
+    public ResponseEntity<?> export(@PathVariable Long resumeId) {
+        ResumeEntity entity = resumeService.getById(resumeId);
+
+        try {
+            byte[] pdfBytes = pdfExportService.exportResume(entity);
+
+            // RFC 5987: filename*=UTF-8''xxx 支持中文文件名
+            String encoded = URLEncoder.encode(
+                    (entity.getFileName() != null ? entity.getFileName() : "简历报告") + ".pdf",
+                    StandardCharsets.UTF_8);
+
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_PDF)
+                    .header("Content-Disposition",
+                            "attachment; filename*=UTF-8''" + encoded)
+                    .body(pdfBytes);
+        } catch (Exception e) {
+            log.error("导出 PDF 失败: resumeId={}, error={}", resumeId, e.getMessage(), e);
+            // 不经过 GlobalExceptionHandler，手动构造错误 JSON
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body("{\"code\":5001,\"message\":\"PDF 导出失败: " + e.getMessage() + "\"}");
+        }
     }
 
     private List<AnalysisItem> buildAnalyses(ResumeEntity e) {
