@@ -42,8 +42,8 @@ dependencies {
     // AWS S3 SDK
     implementation 'software.amazon.awssdk:s3:2.29.51'
 
-    // Redisson — TODO: Redis 缓存和限流阶段引入
-    // implementation 'org.redisson:redisson-spring-boot-starter:4.0.0'
+    // Redisson — Redis 缓存和限流
+    implementation 'org.redisson:redisson-spring-boot-starter:4.0.0'
 
     // iText 8 — TODO: PDF 导出阶段引入
     implementation 'com.itextpdf:itext-core:8.0.5'

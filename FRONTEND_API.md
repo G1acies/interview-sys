@@ -1,78 +1,154 @@
 # Frontend API 文档
 
-前端期望的后端 API 接口定义，按模块分类。
-
-## 通用约定
-
-- **请求方式**: RESTful
-- **响应格式**: 统一包 `{code: number, message: string, data: T}`
-  - `code === 200` → 成功，前端取 `data`
-  - `code !== 200` → 失败，前端取 `message` 显示
-- **Content-Type**: JSON (`application/json`)，上传用 `multipart/form-data`
-- **Base URL**: 开发环境 `http://localhost:8080`
+> 本文档由前端 `src/api/` 下的实际调用代码和 `src/types/` 的类型定义自动对齐生成，
+> 后端实现必须严格匹配本文档的请求/响应格式。
 
 ---
 
-## 1. 简历上传
+## 通用约定
 
-### POST /api/resumes/upload
+### 响应格式
 
-上传简历文件，后端完成 Tika 解析 + AI 分析。
-
-- **Content-Type**: `multipart/form-data`
-- **Body**: `file` — PDF/DOCX/DOC/TXT 文件
-- **超时**: 5 分钟
-
-**返回示例**:
+所有接口统一使用 HTTP 200 + JSON 响应体：
 
 ```json
 {
   "code": 200,
   "message": "success",
+  "data": { ... }
+}
+```
+
+- `code === 200` → 成功，前端取 `data`
+- `code !== 200` → 失败，前端显示 `message`
+- `data` 为 `null` 表示无返回值的操作（如删除、重分析）
+
+### 请求方式
+
+| 请求 | 说明 |
+|------|------|
+| `GET` | 查询，参数通过 `params` / query string |
+| `POST` | 创建或触发操作 |
+| `PUT` | 全量更新 |
+| `PATCH` | 部分更新（如仅改状态） |
+| `DELETE` | 删除 |
+
+### 内容类型
+
+- 默认：`application/json`
+- 文件上传：`multipart/form-data`
+- PDF 导出：返回 `application/pdf` 二进制（不走 Result 包装）
+
+### 超时
+
+| 场景 | 超时 |
+|------|------|
+| 普通请求 | 60s |
+| 文件上传 | 300s（5分钟） |
+| AI 生成/评估（创建面试、提交答案、获取报告、知识库查询） | 180s（3分钟） |
+
+### Base URL
+
+- 开发环境：`http://localhost:8080`
+- 生产环境：同域（由 nginx 反向代理）
+
+### 错误处理
+
+后端应尽量返回业务友好的错误信息，前端统一通过 `message` 字段展示给用户。
+
+---
+
+## 1. 简历模块
+
+### 1.1 健康检查
+
+```
+GET /api/resumes/health
+```
+
+**响应**：
+```json
+{
+  "code": 200,
+  "message": "success",
   "data": {
-    "storage": {
-      "fileKey": "resumes/2026/06/21/a1b2c3d4_简历.pdf",
-      "fileUrl": "http://localhost:9000/interview-guide/resumes/2026/06/21/a1b2c3d4_简历.pdf",
-      "resumeId": 7
-    },
-    "analysis": null,
-    "duplicate": false
+    "status": "ok",
+    "service": "resume"
   }
 }
 ```
 
-**字段说明**:
+---
 
-| 路径 | 类型 | 必填 | 说明 |
+### 1.2 上传简历
+
+```
+POST /api/resumes/upload
+```
+
+**Content-Type**: `multipart/form-data`
+
+**请求参数**：
+
+| 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `storage.fileKey` | string | ✅ | MinIO 存储键 |
-| `storage.fileUrl` | string | ✅ | 文件访问 URL |
-| `storage.resumeId` | number | ✅ | 简历 ID |
-| `analysis` | object | ❌ | AI 分析结果（异步可能为 null） |
-| `duplicate` | boolean | ❌ | 是否重复文件 |
+| `file` | File | ✅ | PDF / DOCX / DOC / TXT，最大 20MB |
 
-### GET /api/resumes/health
+**处理流程**（后端完成）：校验 → 上传 MinIO → 入库（PENDING）→ Tika 解析 → AI 分析 → 返回
 
-健康检查，返回 `{status: "ok", service: "resume"}`。
+**超时**: 300s
+
+**响应**（`UploadResponse`）：
+```typescript
+interface UploadResponse {
+  storage: {
+    fileKey: string;     // MinIO 存储键，如 "resumes/2026/06/21/xxx_简历.pdf"
+    fileUrl: string;     // 文件访问 URL
+    resumeId: number;    // 简历 ID
+  };
+  analysis?: ResumeAnalysisResponse | null;  // AI 分析结果（可能为 null）
+  duplicate?: boolean;   // 是否重复文件
+  message?: string;
+}
+
+interface ResumeAnalysisResponse {
+  overallScore: number;               // 总分 0-100
+  scoreDetail: {
+    contentScore: number;              // 内容完整性 0-25
+    structureScore: number;            // 结构清晰度 0-20
+    skillMatchScore: number;           // 技能匹配度 0-25
+    expressionScore: number;           // 表达专业性 0-15
+    projectScore: number;              // 项目经验 0-15
+  };
+  summary: string;                     // 简历摘要
+  strengths: string[];                 // 优点列表
+  suggestions: Array<{                 // 改进建议
+    category: string;                  //   类别：内容/格式/技能/项目等
+    priority: '高' | '中' | '低';     //   优先级
+    issue: string;                     //   问题描述
+    recommendation: string;            //   具体建议
+  }>;
+  originalText: string;                // 原始简历文本
+}
+```
 
 ---
 
-## 2. 简历历史
+### 1.3 获取简历列表
 
-### GET /api/resumes
+```
+GET /api/resumes
+```
 
-获取全部简历列表。
-
-**返回**: `ResumeListItem[]`
-
+**响应**（`ResumeListItem[]`）：
 ```typescript
 interface ResumeListItem {
   id: number;
   filename: string;
-  fileSize: number;
-  uploadedAt: string;       // ISO 时间
+  fileSize: number;              // 字节
+  uploadedAt: string;            // ISO 8601
   accessCount: number;
-  latestScore?: number;
+  latestScore?: number;          // 最新评分 0-100
   lastAnalyzedAt?: string;
   interviewCount: number;
   analyzeStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
@@ -81,25 +157,29 @@ interface ResumeListItem {
 }
 ```
 
-### GET /api/resumes/{id}/detail
+---
 
-获取简历详情（含分析记录和面试记录）。
+### 1.4 获取简历详情
 
-**返回**: `ResumeDetail`
+```
+GET /api/resumes/{id}/detail
+```
 
+**响应**（`ResumeDetail`）：
 ```typescript
 interface ResumeDetail {
   id: number;
   filename: string;
   fileSize: number;
-  contentType: string;
+  contentType: string;          // MIME 类型
   storageUrl: string;
   uploadedAt: string;
-  resumeText: string;           // 原始文本
-  analyzeStatus?: string;
+  accessCount: number;
+  resumeText: string;           // Tika 解析出的纯文本
+  analyzeStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
   analyzeError?: string;
   analyses: AnalysisItem[];     // 分析记录
-  interviews: InterviewItem[];  // 面试记录
+  interviews: InterviewItem[];  // 关联的面试记录
 }
 
 interface AnalysisItem {
@@ -113,342 +193,1417 @@ interface AnalysisItem {
   summary: string;
   analyzedAt: string;
   strengths: string[];
-  suggestions: Suggestion[];
+  suggestions: unknown[];
 }
 ```
-
-### GET /api/resumes/statistics
-
-获取统计信息。
-
-**返回**: `{totalCount: number, totalInterviewCount: number, totalAccessCount: number}`
-
-### POST /api/resumes/{id}/reanalyze
-
-重新分析简历，无请求体，返回 `void`。
-
-### DELETE /api/resumes/{id}
-
-删除简历，返回 `void`。
-
-### GET /api/resumes/{resumeId}/export
-
-导出简历分析报告 PDF，返回 `Blob`。
 
 ---
 
-## 3. 模拟面试
+### 1.5 获取简历统计
 
-### GET /api/interview/sessions
+```
+GET /api/resumes/statistics
+```
 
-获取所有面试会话列表。
-
-**返回**: `TextSessionMeta[]`
-
-### POST /api/interview/sessions
-
-创建面试会话。
-
-**Body**:
-```json
-{
-  "resumeId": 1,
-  "questionCount": 5,
-  "categories": ["技术", "项目"]
+**响应**：
+```typescript
+interface ResumeStats {
+  totalCount: number;            // 简历总数
+  totalInterviewCount: number;   // 总面试次数
+  totalAccessCount: number;      // 总访问次数
 }
 ```
-**超时**: 3 分钟
 
-**返回**: `InterviewSession`
+---
 
-### GET /api/interview/sessions/{sessionId}
+### 1.6 重新分析简历
 
-获取面试会话详情。
+```
+POST /api/resumes/{id}/reanalyze
+```
 
-### GET /api/interview/sessions/{sessionId}/question
+无请求体。返回 `void`（`data: null`）。
 
-获取当前面试题目。
+---
 
-**返回**: `CurrentQuestionResponse`
+### 1.7 删除简历
 
-### POST /api/interview/sessions/{sessionId}/answers
+```
+DELETE /api/resumes/{id}
+```
 
-提交答案。
+返回 `void`（`data: null`）。
 
-**Body**:
+> ⚠️ 删除简历时应同时删除关联的面试会话和答案。
+
+---
+
+### 1.8 导出简历分析报告
+
+```
+GET /api/resumes/{resumeId}/export
+```
+
+**不同之处**：此接口不走统一的 Result 包装，直接返回二进制 PDF。
+
+| 响应头 | 值 |
+|--------|-----|
+| `Content-Type` | `application/pdf` |
+| `Content-Disposition` | `attachment; filename*=UTF-8''{文件名}.pdf` |
+
+**错误时**：返回 HTTP 500 + 手动构造的 JSON `{"code": 5001, "message": "..."}`。
+
+---
+
+## 2. 模拟面试模块
+
+### 2.1 获取所有面试会话
+
+```
+GET /api/interview/sessions
+```
+
+**响应**（`TextSessionMeta[]`）：
+```typescript
+interface TextSessionMeta {
+  sessionId: string;                 // UUID
+  skillId: string;                   // 面试方向，如 "java-backend"
+  difficulty: string;                // 难度 junior / mid / senior
+  resumeId: number | null;           // 关联简历 ID（通用面试为 null）
+  totalQuestions: number;
+  status: 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'EVALUATED';
+  evaluateStatus: string | null;     // null | PENDING | PROCESSING | COMPLETED | FAILED
+  evaluateError: string | null;
+  overallScore: number | null;       // 总分 0-100
+  createdAt: string;
+  completedAt: string | null;
+}
+```
+
+---
+
+### 2.2 创建面试会话
+
+```
+POST /api/interview/sessions
+```
+
+**Content-Type**: `application/json`
+
+**请求体**（`CreateInterviewRequest`）：
+```typescript
+interface CreateInterviewRequest {
+  resumeText: string;                // 简历文本（可选，无简历时传空串）
+  questionCount: number;             // 题目数量 3-20
+  resumeId?: number;                 // 简历 ID（可选）
+  forceCreate?: boolean;             // 是否强制创建新会话（忽略未完成会话）
+  llmProvider?: string;              // LLM 提供商标识
+  skillId: string;                   // 面试主题 ID，如 "java-backend"
+  difficulty?: string;               // 难度 junior / mid / senior
+  customCategories?: CategoryDTO[];  // 自定义分类（JD 解析结果）
+  jdText?: string;                   // JD 原文
+}
+```
+
+**超时**: 180s（AI 出题需要时间）
+
+**响应**（`InterviewSession`）：
+```typescript
+interface InterviewSession {
+  sessionId: string;
+  resumeText: string;
+  totalQuestions: number;
+  currentQuestionIndex: number;      // 当前题号（从 0 开始）
+  questions: InterviewQuestion[];
+  status: 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'EVALUATED';
+}
+
+interface InterviewQuestion {
+  questionIndex: number;
+  question: string;                  // 题目原文
+  type: string;                      // 题型分类，如 "JAVA"、"MYSQL"
+  category: string;                  // 更细粒度的类别
+  userAnswer: string | null;
+  score: number | null;
+  feedback: string | null;
+}
+```
+
+**说明**：
+- 前端期望创建时返回完整的 `questions` 列表（含已生成的所有题目）
+- 有 `resumeId` 时，若存在未完成的会话且 `forceCreate` 不为 `true`，应用返回已有会话
+
+---
+
+### 2.3 获取会话信息
+
+```
+GET /api/interview/sessions/{sessionId}
+```
+
+**响应**：同 `InterviewSession`（见 2.2）
+
+---
+
+### 2.4 获取当前题目
+
+```
+GET /api/interview/sessions/{sessionId}/question
+```
+
+**响应**（`CurrentQuestionResponse`）：
+```typescript
+interface CurrentQuestionResponse {
+  completed: boolean;                // 是否已答完所有题
+  question?: InterviewQuestion;      // 当前题目（未完成时有值）
+  message?: string;                  // 已完成时的提示信息
+}
+```
+
+---
+
+### 2.5 提交答案（进入下一题）
+
+```
+POST /api/interview/sessions/{sessionId}/answers
+```
+
+**请求体**：
 ```json
 {
-  "sessionId": "...",
   "questionIndex": 0,
-  "answer": "我的回答..."
+  "answer": "我的回答内容..."
 }
 ```
-**超时**: 3 分钟
 
-### PUT /api/interview/sessions/{sessionId}/answers
+**超时**: 180s（AI 评估单题需要时间）
 
-修改答案。
-
-### GET /api/interview/sessions/{sessionId}/report
-
-获取面试评估报告，**超时**: 3 分钟。
-
-### GET /api/interview/sessions/unfinished/{resumeId}
-
-获取某简历的未完成面试。
-
-### POST /api/interview/sessions/{sessionId}/complete
-
-完成面试。
-
-### GET /api/interview/sessions/{sessionId}/details
-
-获取面试详情（含答案和评估）。
-
-### GET /api/interview/sessions/{sessionId}/export
-
-导出面试报告 PDF，返回 `Blob`。
-
-### DELETE /api/interview/sessions/{sessionId}
-
-删除面试记录。
+**响应**（`SubmitAnswerResponse`）：
+```typescript
+interface SubmitAnswerResponse {
+  hasNextQuestion: boolean;              // 是否还有下一题
+  nextQuestion: InterviewQuestion | null; // 下一题（hasNextQuestion=true 时有值）
+  currentIndex: number;                  // 当前已答题号
+  totalQuestions: number;                // 总题数
+}
+```
 
 ---
 
-## 4. 技能
+### 2.6 暂存答案（不进入下一题）
 
-### GET /api/interview/skills
+```
+PUT /api/interview/sessions/{sessionId}/answers
+```
 
-获取所有技能列表。
-
-### GET /api/interview/skills/{id}
-
-获取单个技能详情。
-
-### POST /api/interview/skills/parse-jd
-
-解析 JD 文本提取技能。
-
-**Body**: `{jdText: string}`
-
----
-
-## 5. 知识库
-
-### POST /api/knowledgebase/upload
-
-上传知识库文件，`multipart/form-data`。5 分钟超时。
-
-### GET /api/knowledgebase/list?keyword=&category=&page=&size=
-
-获取知识库列表。
-
-### GET /api/knowledgebase/{id}
-
-获取单个知识库详情。
-
-### DELETE /api/knowledgebase/{id}
-
-删除知识库。
-
-### GET /api/knowledgebase/{id}/download
-
-下载知识库文件。
-
-### GET /api/knowledgebase/categories
-
-获取所有分类。
-
-### GET /api/knowledgebase/category/{category}
-
-按分类查询。
-
-### GET /api/knowledgebase/uncategorized
-
-获取未分类条目。
-
-### PUT /api/knowledgebase/{id}/category
-
-更新分类。**Body**: `{category: string}`
-
-### GET /api/knowledgebase/search?keyword=
-
-关键词搜索。
-
-### GET /api/knowledgebase/stats
-
-获取统计信息。
-
-### POST /api/knowledgebase/{id}/revectorize
-
-重新向量化。
-
-### POST /api/knowledgebase/query
-
-RAG 查询，3 分钟超时。
-
-### /api/knowledgebase/query/stream (SSE)
-
-流式 RAG 查询，通过 `EventSource` 或 `fetch` 消费。
-
----
-
-## 6. RAG 对话
-
-### GET /api/rag-chat/sessions
-
-获取会话列表。
-
-### POST /api/rag-chat/sessions
-
-创建对话会话。
-
-**Body**:
+**请求体**：
 ```json
 {
-  "resumeId": 1,
-  "title": "面试准备咨询",
-  "knowledgeBaseIds": [1, 2]
+  "questionIndex": 0,
+  "answer": "暂存的内容..."
 }
 ```
 
-### GET /api/rag-chat/sessions/{sessionId}
+**说明**：仅保存不评估，不推进 `currentQuestionIndex`。
 
-获取会话详情。
-
-### PUT /api/rag-chat/sessions/{sessionId}/title
-
-修改标题。**Body**: `{title: string}`
-
-### PUT /api/rag-chat/sessions/{sessionId}/knowledge-bases
-
-更新关联知识库。**Body**: `{knowledgeBaseIds: number[]}`
-
-### PUT /api/rag-chat/sessions/{sessionId}/pin
-
-置顶会话。
-
-### DELETE /api/rag-chat/sessions/{sessionId}
-
-删除会话。
-
-### /api/rag-chat/sessions/{sessionId}/messages/stream (SSE)
-
-消息流式响应。
+**响应**：`void`
 
 ---
 
-## 7. 面试日程
+### 2.7 生成面试报告
 
-### GET /api/interview-schedule?startDate=&endDate=&status=
+```
+GET /api/interview/sessions/{sessionId}/report
+```
 
-获取日程列表。
+**超时**: 180s（AI 评估需要时间）
 
-### POST /api/interview-schedule
-
-创建日程。
-
-### POST /api/interview-schedule/parse
-
-解析面试邀请链接。
-
-**Body**: `{url: string}`
-
-### GET /api/interview-schedule/{id}
-
-获取详情。
-
-### PUT /api/interview-schedule/{id}
-
-更新。
-
-### DELETE /api/interview-schedule/{id}
-
-删除。
-
-### PATCH /api/interview-schedule/{id}/status
-
-更新状态。
-
----
-
-## 8. 语音面试
-
-### GET /api/voice-interview/sessions?status=&page=&size=
-
-获取语音面试会话列表。
-
-### POST /api/voice-interview/sessions
-
-创建语音面试。
-
-### GET /api/voice-interview/sessions/{sessionId}
-
-获取会话详情。
-
-### POST /api/voice-interview/sessions/{sessionId}/end
-
-结束会话。
-
-### GET /api/voice-interview/sessions/{sessionId}/messages
-
-获取消息历史。
-
-### GET /api/voice-interview/sessions/{sessionId}/evaluation
-
-获取评估状态。
-
-### POST /api/voice-interview/sessions/{sessionId}/evaluation
-
-请求评估。
-
-### PUT /api/voice-interview/sessions/{sessionId}/pause
-
-暂停会话。
-
-### PUT /api/voice-interview/sessions/{sessionId}/resume
-
-恢复会话。
-
-### DELETE /api/voice-interview/sessions/{sessionId}
-
-删除会话。
+**响应**（`InterviewReport`）：
+```typescript
+interface InterviewReport {
+  sessionId: string;
+  totalQuestions: number;
+  overallScore: number;                  // 总分 0-100
+  categoryScores: Array<{                // 各类别得分
+    category: string;
+    score: number;
+    questionCount: number;
+  }>;
+  questionDetails: Array<{               // 每题评估
+    questionIndex: number;
+    question: string;
+    category: string;
+    userAnswer: string;
+    score: number;
+    feedback: string;
+  }>;
+  overallFeedback: string;               // 总体评语
+  strengths: string[];                   // 优势
+  improvements: string[];                // 改进建议
+  referenceAnswers: Array<{              // 参考答案
+    questionIndex: number;
+    question: string;
+    referenceAnswer: string;
+    keyPoints: string[];
+  }>;
+}
+```
 
 ---
 
-## 9. LLM Provider 管理
+### 2.8 查找未完成会话
 
-| 方法 | 路径 | 说明 |
+```
+GET /api/interview/sessions/unfinished/{resumeId}
+```
+
+**说明**：前端在进入面试页面时会先调此接口，有未完成会话则直接恢复。
+
+**响应**：同 `InterviewSession`（见 2.2）
+- **无未完成会话时**：返回 HTTP 200 + `data: null`（前端 `try/catch` 处理）
+
+---
+
+### 2.9 提前交卷
+
+```
+POST /api/interview/sessions/{sessionId}/complete
+```
+
+**说明**：未答完所有题时提前结束，将状态置为 `COMPLETED`，
+触发异步评估（通过 Redis Stream 发送评估任务）。
+
+**响应**：`void`
+
+---
+
+### 2.10 获取面试详情（含完整答案和评估）
+
+```
+GET /api/interview/sessions/{sessionId}/details
+```
+
+**响应**（`InterviewDetail`）：
+```typescript
+interface InterviewDetail {
+  id: number;
+  sessionId: string;
+  totalQuestions: number;
+  status: string;
+  evaluateStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+  evaluateError?: string;
+  overallScore: number | null;
+  overallFeedback: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  questions: unknown[];                  // 题目列表（原始 JSON）
+  strengths: string[];                   // 优势列表
+  improvements: string[];                // 改进建议
+  referenceAnswers: unknown[];           // 参考答案
+  answers: AnswerItem[];                 // 每题详情
+}
+
+interface AnswerItem {
+  questionIndex: number;
+  question: string;
+  category: string;
+  userAnswer: string;
+  score: number;
+  feedback: string;
+  referenceAnswer?: string;
+  keyPoints?: string[];
+  answeredAt: string;
+}
+```
+
+---
+
+### 2.11 导出面试报告 PDF
+
+```
+GET /api/interview/sessions/{sessionId}/export
+```
+
+同简历导出（1.8），不走 Result 包装，直接返回二进制 PDF。
+
+| 响应头 | 值 |
+|--------|-----|
+| `Content-Type` | `application/pdf` |
+| `Content-Disposition` | `attachment; filename*=UTF-8''模拟面试报告_{sessionId}.pdf` |
+
+---
+
+### 2.12 删除面试会话
+
+```
+DELETE /api/interview/sessions/{sessionId}
+```
+
+**说明**：级联删除关联的答案。返回 `void`。
+
+---
+
+## 3. 技能管理模块
+
+### 3.1 获取所有技能
+
+```
+GET /api/interview/skills
+```
+
+**响应**（`SkillDTO[]`）：
+```typescript
+interface SkillDTO {
+  id: string;                            // 技能标识符，如 "java-backend"
+  name: string;                          // 显示名称
+  description: string;                   // 描述
+  categories: CategoryDTO[];             // 分类列表
+  isPreset: boolean;                     // 是否预设技能
+  sourceJd: string | null;               // JD 原文（自定义技能时有值）
+  persona?: string;                      // 面试官角色设定
+  display?: {                            // 前端展示配置
+    icon: string;
+    gradient: string;
+    iconBg: string;
+    iconColor: string;
+  };
+}
+
+interface CategoryDTO {
+  key: string;                           // 分类键，如 "JAVA"
+  label: string;                         // 显示标签，如 "Java 基础"
+  priority: 'CORE' | 'NORMAL' | 'ALWAYS_ONE';
+  ref?: string;                          // 关联的参考文件
+  shared?: boolean;                      // 是否共享分类
+}
+```
+
+---
+
+### 3.2 获取单个技能
+
+```
+GET /api/interview/skills/{id}
+```
+
+**响应**：同 `SkillDTO`（见 3.1）
+
+---
+
+### 3.3 解析 JD 提取分类
+
+```
+POST /api/interview/skills/parse-jd
+```
+
+**请求体**：
+```json
+{
+  "jdText": "职位描述原文..."
+}
+```
+
+**响应**（`CategoryDTO[]`）：同 `CategoryDTO`（见 3.1）
+
+---
+
+## 4. 知识库模块
+
+### 4.1 上传知识库文件
+
+```
+POST /api/knowledgebase/upload
+```
+
+**Content-Type**: `multipart/form-data`
+
+**请求参数**：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `file` | File | ✅ | PDF / DOCX / TXT 等 |
+| `name` | string | ❌ | 自定义名称 |
+| `category` | string | ❌ | 分类 |
+
+**超时**: 300s
+
+**响应**（`UploadKnowledgeBaseResponse`）：
+```typescript
+interface UploadKnowledgeBaseResponse {
+  knowledgeBase: {
+    id: number;
+    name: string;
+    category: string;
+    fileSize: number;
+    contentLength: number;
+  };
+  storage: {
+    fileKey: string;
+    fileUrl: string;
+  };
+  duplicate: boolean;                    // 是否重复文件
+}
+```
+
+---
+
+### 4.2 获取知识库列表
+
+```
+GET /api/knowledgebase/list?sortBy={sortBy}&vectorStatus={status}
+```
+
+**查询参数**：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `sortBy` | string | ❌ | 排序方式：`time` / `size` / `access` / `question` |
+| `vectorStatus` | string | ❌ | 向量化状态筛选：`PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` |
+
+**响应**（`KnowledgeBaseItem[]`）：
+```typescript
+interface KnowledgeBaseItem {
+  id: number;
+  name: string;
+  category: string | null;
+  originalFilename: string;
+  fileSize: number;
+  contentType: string;
+  uploadedAt: string;
+  lastAccessedAt: string;
+  accessCount: number;
+  questionCount: number;
+  vectorStatus: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+  vectorError: string | null;
+  chunkCount: number;
+}
+```
+
+---
+
+### 4.3 获取知识库详情
+
+```
+GET /api/knowledgebase/{id}
+```
+
+**响应**：同 `KnowledgeBaseItem`（见 4.2）
+
+---
+
+### 4.4 删除知识库
+
+```
+DELETE /api/knowledgebase/{id}
+```
+
+**响应**：`void`
+
+---
+
+### 4.5 下载知识库文件
+
+```
+GET /api/knowledgebase/{id}/download
+```
+
+**说明**：不走 Result 包装，直接返回文件二进制。
+
+**响应头**：`Content-Type: application/octet-stream`。
+
+---
+
+### 4.6 获取所有分类
+
+```
+GET /api/knowledgebase/categories
+```
+
+**响应**：`string[]`（分类名称列表）
+
+---
+
+### 4.7 按分类查询
+
+```
+GET /api/knowledgebase/category/{category}
+```
+
+**响应**：`KnowledgeBaseItem[]`
+
+---
+
+### 4.8 获取未分类条目
+
+```
+GET /api/knowledgebase/uncategorized
+```
+
+**响应**：`KnowledgeBaseItem[]`
+
+---
+
+### 4.9 更新分类
+
+```
+PUT /api/knowledgebase/{id}/category
+```
+
+**请求体**：
+```json
+{
+  "category": "新分类名称"
+}
+```
+
+**响应**：`void`
+
+---
+
+### 4.10 搜索知识库
+
+```
+GET /api/knowledgebase/search?keyword={keyword}
+```
+
+**响应**：`KnowledgeBaseItem[]`
+
+---
+
+### 4.11 获取统计信息
+
+```
+GET /api/knowledgebase/stats
+```
+
+**响应**（`KnowledgeBaseStats`）：
+```typescript
+interface KnowledgeBaseStats {
+  totalCount: number;              // 总数
+  totalQuestionCount: number;      // 总问题数
+  totalAccessCount: number;        // 总访问次数
+  completedCount: number;          // 向量化完成数
+  processingCount: number;         // 向量化处理中
+}
+```
+
+---
+
+### 4.12 重新向量化
+
+```
+POST /api/knowledgebase/{id}/revectorize
+```
+
+**响应**：`void`
+
+---
+
+### 4.13 RAG 查询（非流式）
+
+```
+POST /api/knowledgebase/query
+```
+
+**超时**: 180s
+
+**请求体**：
+```json
+{
+  "knowledgeBaseIds": [1, 2],    // 支持多个知识库
+  "question": "查询问题"
+}
+```
+
+**响应**（`QueryResponse`）：
+```typescript
+interface QueryResponse {
+  answer: string;                  // AI 回答
+  knowledgeBaseId: number;         // 来源知识库 ID
+  knowledgeBaseName: string;       // 来源知识库名称
+}
+```
+
+---
+
+### 4.14 RAG 查询（流式 SSE）
+
+```
+POST /api/knowledgebase/query/stream
+```
+
+**请求体**：同 4.13
+
+**响应格式**：Server-Sent Events (SSE)
+
+```
+data:回答内容chunk1
+data:回答内容chunk2
+data:回答内容chunk3
+...
+```
+
+前端通过 `fetch` + `ReadableStream` 逐块消费，非 `EventSource`。
+
+**说明**：
+- 每行 `data:` 后跟一个文本块
+- 文本块拼接后为完整 Markdown 回答
+- 流结束时 `response.body` 的 `done` 为 `true`
+
+---
+
+## 5. RAG 对话模块
+
+### 5.1 获取会话列表
+
+```
+GET /api/rag-chat/sessions
+```
+
+**响应**（`RagChatSessionListItem[]`）：
+```typescript
+interface RagChatSessionListItem {
+  id: number;
+  title: string;
+  messageCount: number;
+  knowledgeBaseNames: string[];
+  updatedAt: string;
+  isPinned: boolean;               // 是否置顶
+}
+```
+
+---
+
+### 5.2 创建对话会话
+
+```
+POST /api/rag-chat/sessions
+```
+
+**请求体**：
+```json
+{
+  "knowledgeBaseIds": [1, 2],
+  "title": "面试准备咨询"             // 可选
+}
+```
+
+**响应**（`RagChatSession`）：
+```typescript
+interface RagChatSession {
+  id: number;
+  title: string;
+  knowledgeBaseIds: number[];
+  createdAt: string;
+}
+```
+
+---
+
+### 5.3 获取会话详情
+
+```
+GET /api/rag-chat/sessions/{sessionId}
+```
+
+**响应**（`RagChatSessionDetail`）：
+```typescript
+interface RagChatSessionDetail {
+  id: number;
+  title: string;
+  knowledgeBases: Array<{
+    id: number;
+    name: string;
+    originalFilename: string;
+    fileSize: number;
+    contentType: string;
+    uploadedAt: string;
+    lastAccessedAt: string;
+    accessCount: number;
+    questionCount: number;
+  }>;
+  messages: Array<{
+    id: number;
+    type: 'user' | 'assistant';
+    content: string;
+    createdAt: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+---
+
+### 5.4 修改会话标题
+
+```
+PUT /api/rag-chat/sessions/{sessionId}/title
+```
+
+**请求体**：
+```json
+{
+  "title": "新标题"
+}
+```
+
+**响应**：`void`
+
+---
+
+### 5.5 更新关联知识库
+
+```
+PUT /api/rag-chat/sessions/{sessionId}/knowledge-bases
+```
+
+**请求体**：
+```json
+{
+  "knowledgeBaseIds": [1, 3]
+}
+```
+
+**响应**：`void`
+
+---
+
+### 5.6 置顶/取消置顶
+
+```
+PUT /api/rag-chat/sessions/{sessionId}/pin
+```
+
+**说明**：切换置顶状态（取反）。
+
+**响应**：`void`
+
+---
+
+### 5.7 删除会话
+
+```
+DELETE /api/rag-chat/sessions/{sessionId}
+```
+
+**响应**：`void`
+
+---
+
+### 5.8 流式消息
+
+```
+POST /api/rag-chat/sessions/{sessionId}/messages/stream
+```
+
+**请求体**：
+```json
+{
+  "question": "用户提问内容"
+}
+```
+
+**响应格式**：Server-Sent Events (SSE)
+
+```
+data:回复内容chunk1
+data:回复内容chunk2
+...
+```
+
+**说明**：
+- 会话不存在时自动创建
+- 返回的 `data:` 行拼接后为完整 Markdown 回复
+- 流结束时 `response.body` 的 `done` 为 `true`
+
+---
+
+## 6. 面试日程模块
+
+### 6.1 获取日程列表
+
+```
+GET /api/interview-schedule?status={status}&start={start}&end={end}
+```
+
+**查询参数**：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `status` | string | ❌ | 筛选状态：`PENDING` / `COMPLETED` / `CANCELLED` / `RESCHEDULED` |
+| `start` | string | ❌ | 起始时间（ISO 8601） |
+| `end` | string | ❌ | 结束时间（ISO 8601） |
+
+**响应**（`InterviewSchedule[]`）：
+```typescript
+interface InterviewSchedule {
+  id: number;
+  companyName: string;             // 公司名称
+  position: string;                // 职位
+  interviewTime: string;           // 面试时间 ISO 8601
+  interviewType: 'ONSITE' | 'VIDEO' | 'PHONE';
+  meetingLink?: string;            // 会议链接
+  roundNumber: number;             // 面试轮次
+  interviewer?: string;            // 面试官
+  notes?: string;                  // 备注
+  status: 'PENDING' | 'COMPLETED' | 'CANCELLED' | 'RESCHEDULED';
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+---
+
+### 6.2 创建日程
+
+```
+POST /api/interview-schedule
+```
+
+**请求体**（`CreateInterviewRequest`）：
+```json
+{
+  "companyName": "字节跳动",
+  "position": "后端开发工程师",
+  "interviewTime": "2026-07-15T14:00:00+08:00",
+  "interviewType": "VIDEO",
+  "meetingLink": "https://xxx",
+  "roundNumber": 2,
+  "interviewer": "张三",
+  "notes": "二面，主要考察系统设计"
+}
+```
+
+**响应**：同 `InterviewSchedule`（见 6.1）
+
+---
+
+### 6.3 解析面试邀请
+
+```
+POST /api/interview-schedule/parse
+```
+
+**请求体**：
+```json
+{
+  "rawText": "面试邀请原文内容...",
+  "source": "feishu"          // 来源：feishu / tencent / zoom / other
+}
+```
+
+**响应**（`ParseResponse`）：
+```typescript
+interface ParseResponse {
+  success: boolean;             // 是否解析成功
+  data: CreateInterviewRequest | null;
+  confidence: number;           // 解析置信度 0-1
+  parseMethod: 'rule' | 'ai';  // 解析方式
+  log: string;                  // 解析日志
+}
+```
+
+---
+
+### 6.4 获取日程详情
+
+```
+GET /api/interview-schedule/{id}
+```
+
+**响应**：同 `InterviewSchedule`（见 6.1）
+
+---
+
+### 6.5 更新日程
+
+```
+PUT /api/interview-schedule/{id}
+```
+
+**请求体**：同创建（见 6.2）
+
+**响应**：同 `InterviewSchedule`
+
+---
+
+### 6.6 删除日程
+
+```
+DELETE /api/interview-schedule/{id}
+```
+
+**响应**：`void`
+
+---
+
+### 6.7 更新日程状态
+
+```
+PATCH /api/interview-schedule/{id}/status?status={status}
+```
+
+**查询参数**：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `status` | string | ✅ | `PENDING` / `COMPLETED` / `CANCELLED` / `RESCHEDULED` |
+
+**响应**：同 `InterviewSchedule`
+
+---
+
+## 7. 语音面试模块
+
+### 7.1 创建语音面试会话
+
+```
+POST /api/voice-interview/sessions
+```
+
+**请求体**（`CreateSessionRequest`）：
+```json
+{
+  "roleType": "interviewer",       // 面试官角色
+  "skillId": "java-backend",       // 面试方向
+  "difficulty": "mid",             // 难度
+  "customJdText": "...",           // 自定义 JD（可选）
+  "resumeId": 1,                   // 简历 ID（可选）
+  "introEnabled": true,            // 是否开启自我介绍环节
+  "techEnabled": true,             // 是否开启技术问答环节
+  "projectEnabled": true,          // 是否开启项目问答环节
+  "hrEnabled": false,              // 是否开启 HR 问答环节
+  "plannedDuration": 30,           // 计划时长（分钟）
+  "llmProvider": "dashscope"       // LLM 提供商（可选）
+}
+```
+
+**响应**（`SessionResponse`）：
+```typescript
+interface SessionResponse {
+  sessionId: number;
+  roleType: string;
+  currentPhase: string;
+  status: string;
+  startTime: string;
+  plannedDuration: number;
+  webSocketUrl: string;            // WebSocket 连接地址
+}
+```
+
+---
+
+### 7.2 获取会话详情
+
+```
+GET /api/voice-interview/sessions/{sessionId}
+```
+
+**响应**：同 `SessionResponse`（见 7.1）
+
+---
+
+### 7.3 获取会话列表
+
+```
+GET /api/voice-interview/sessions?userId={userId}&status={status}
+```
+
+**响应**（`SessionMeta[]`）：
+```typescript
+interface SessionMeta {
+  sessionId: number;
+  roleType: string;
+  status: string;
+  currentPhase: string;
+  createdAt: string;
+  updatedAt: string;
+  actualDuration?: number;
+  messageCount: number;
+  evaluateStatus?: string;
+  evaluateError?: string;
+}
+```
+
+---
+
+### 7.4 结束会话
+
+```
+POST /api/voice-interview/sessions/{sessionId}/end
+```
+
+**响应**：`void`
+
+---
+
+### 7.5 获取消息历史
+
+```
+GET /api/voice-interview/sessions/{sessionId}/messages
+```
+
+**响应**（`InterviewMessage[]`）：
+```typescript
+interface InterviewMessage {
+  id: number;
+  sessionId: number;
+  messageType: string;
+  phase: string;
+  userRecognizedText: string;
+  aiGeneratedText: string;
+  timestamp: string;
+  sequenceNum: number;
+}
+```
+
+---
+
+### 7.6 获取评估状态
+
+```
+GET /api/voice-interview/sessions/{sessionId}/evaluation
+```
+
+**说明**：前端轮询此接口，直到 `evaluateStatus` 变为 `COMPLETED` 或 `FAILED`。
+
+**响应**（`EvaluationStatusResponse`）：
+```typescript
+interface EvaluationStatusResponse {
+  evaluateStatus: string | null;       // PENDING | PROCESSING | COMPLETED | FAILED
+  evaluateError?: string | null;
+  evaluation?: VoiceEvaluationDetail | null;  // COMPLETED 时有值
+}
+
+interface VoiceEvaluationDetail {
+  sessionId: number;
+  totalQuestions: number;
+  overallScore: number;
+  overallFeedback: string;
+  strengths: string[];
+  improvements: string[];
+  answers: Array<{
+    questionIndex: number;
+    question: string;
+    category: string;
+    userAnswer: string;
+    score: number;
+    feedback: string;
+    referenceAnswer?: string | null;
+    keyPoints?: string[] | null;
+  }>;
+}
+```
+
+---
+
+### 7.7 触发异步评估
+
+```
+POST /api/voice-interview/sessions/{sessionId}/evaluation
+```
+
+**说明**：手动触发异步评估（会返回当前状态，评估在后台执行）。
+
+**响应**：同 `EvaluationStatusResponse`（见 7.6）
+
+---
+
+### 7.8 暂停/恢复会话
+
+```
+PUT /api/voice-interview/sessions/{sessionId}/pause
+```
+
+**请求体**：
+```json
+{
+  "reason": "user_initiated"
+}
+```
+
+**响应**：`void`
+
+---
+
+```
+PUT /api/voice-interview/sessions/{sessionId}/resume
+```
+
+**响应**：同 `SessionResponse`（见 7.1）
+
+---
+
+### 7.9 删除会话
+
+```
+DELETE /api/voice-interview/sessions/{sessionId}
+```
+
+**响应**：`void`
+
+---
+
+### 7.10 WebSocket 语音通话
+
+**连接地址**：由创建会话时返回的 `webSocketUrl` 提供
+
+**协议格式**：JSON over WebSocket
+
+**客户端 → 服务端**：
+
+| type | data | 说明 |
 |------|------|------|
-| GET | `/api/llm-provider/list` | 获取 provider 列表 |
-| GET | `/api/llm-provider/{id}` | 获取单个 provider |
-| POST | `/api/llm-provider` | 创建 provider |
-| PUT | `/api/llm-provider/{id}` | 更新 provider |
-| DELETE | `/api/llm-provider/{id}` | 删除 provider |
-| POST | `/api/llm-provider/{id}/test` | 测试连接 |
-| POST | `/api/llm-provider/reload` | 重新加载配置 |
-| GET | `/api/llm-provider/default-provider` | 获取默认 provider |
-| PUT | `/api/llm-provider/default-provider` | 设置默认 provider |
-| PUT | `/api/llm-provider/default-embedding-provider` | 设置默认 embedding provider |
-| GET | `/api/llm-provider/voice/asr` | 获取 ASR 配置 |
-| PUT | `/api/llm-provider/voice/asr` | 设置 ASR 配置 |
-| GET | `/api/llm-provider/voice/tts` | 获取 TTS 配置 |
-| PUT | `/api/llm-provider/voice/tts` | 设置 TTS 配置 |
-| POST | `/api/llm-provider/voice/asr/test` | 测试 ASR |
+| `audio` | `{ data: "base64音频", timestamp }` | 发送音频数据 |
+| `control` | `{ action: "start" / "stop" / "next_question" / ... }` | 控制消息 |
+
+**服务端 → 客户端**：
+
+| type | data | 说明 |
+|------|------|------|
+| `subtitle` | `{ text: "识别文本", isFinal: true/false }` | 实时语音识别结果 |
+| `audio` | `{ data: "base64音频", text: "回复文本" }` | AI 语音回复 |
+| `audio_chunk` | `{ data: "base64 WAV", index, isLast }` | 音频分块传输 |
+| `text` | `{ content: "文本", final: true/false }` | AI 文本回复 |
+| `control` | `{ action: "...", message: "..." }` | 控制消息 |
+| `error` | `{ message: "错误描述" }` | 错误消息 |
 
 ---
 
-## 当前实现状态
+## 8. LLM Provider 管理
 
-| 模块 | 状态 |
-|------|------|
-| 简历上传 + Tika 解析 + AI 分析 | ✅ 已实现 |
-| 简历列表/详情/删除 | ⚠️ 返回格式需要对齐前端类型 |
-| 模拟面试 | ❌ 未实现 |
-| 知识库 | ❌ 未实现 |
-| RAG 对话 | ❌ 未实现 |
-| 技能解析 | ❌ 未实现 |
-| 面试日程 | ❌ 未实现 |
-| 语音面试 | ❌ 未实现 |
-| LLM Provider | ❌ 未实现 |
-| PDF 导出 | ❌ 未实现 |
+### 8.1 获取 Provider 列表
+
+```
+GET /api/llm-provider/list
+```
+
+**响应**（`ProviderItem[]`）：
+```typescript
+interface ProviderItem {
+  id: string;                      // 唯一标识
+  baseUrl: string;                 // API 地址
+  maskedApiKey: string;            // 脱敏后的 API Key
+  model: string;                   // 模型名
+  embeddingModel: string | null;   // Embedding 模型名
+  embeddingDimensions: number | null;
+  supportsEmbedding: boolean;
+  temperature: number | null;
+  defaultChatProvider: boolean;    // 默认 Chat Provider
+  defaultEmbeddingProvider: boolean;
+}
+```
+
+---
+
+### 8.2 获取单个 Provider
+
+```
+GET /api/llm-provider/{id}
+```
+
+**响应**：同 `ProviderItem`
+
+---
+
+### 8.3 创建 Provider
+
+```
+POST /api/llm-provider
+```
+
+**请求体**：
+```json
+{
+  "id": "my-provider",
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKey": "sk-xxx",
+  "model": "gpt-4",
+  "embeddingModel": "text-embedding-3-small",
+  "embeddingDimensions": 1024,
+  "supportsEmbedding": true,
+  "temperature": 0.7
+}
+```
+
+**响应**：`void`
+
+---
+
+### 8.4 更新 Provider
+
+```
+PUT /api/llm-provider/{id}
+```
+
+**请求体**：所有字段可选
+```json
+{
+  "baseUrl": "https://new-url",
+  "model": "gpt-4o"
+}
+```
+
+**响应**：`void`
+
+---
+
+### 8.5 删除 Provider
+
+```
+DELETE /api/llm-provider/{id}
+```
+
+**响应**：`void`
+
+---
+
+### 8.6 测试连接
+
+```
+POST /api/llm-provider/{id}/test
+```
+
+**响应**（`ProviderTestResult`）：
+```typescript
+interface ProviderTestResult {
+  success: boolean;
+  message: string;
+  model: string;
+}
+```
+
+---
+
+### 8.7 重新加载配置
+
+```
+POST /api/llm-provider/reload
+```
+
+**说明**：从数据库重新加载所有 Provider 配置到内存缓存。
+
+**响应**：`void`
+
+---
+
+### 8.8 获取/设置默认 Provider
+
+```
+GET /api/llm-provider/default-provider
+```
+
+**响应**（`DefaultProvider`）：
+```typescript
+interface DefaultProvider {
+  defaultProvider: string;
+  defaultEmbeddingProvider: string;
+}
+```
+
+```
+PUT /api/llm-provider/default-provider
+```
+
+**请求体**：同 `DefaultProvider`
+
+**响应**：`void`
+
+---
+
+### 8.9 设置默认 Embedding Provider
+
+```
+PUT /api/llm-provider/default-embedding-provider
+```
+
+**请求体**：同 `DefaultProvider`
+
+**响应**：`void`
+
+---
+
+### 8.10 语音 ASR/TTS 配置
+
+```
+GET /api/llm-provider/voice/asr
+```
+
+**响应**（`AsrConfig`）：
+```typescript
+interface AsrConfig {
+  url: string;
+  model: string;
+  maskedApiKey: string;
+  language: string;
+  format: string;
+  sampleRate: number;
+  enableTurnDetection: boolean;
+  turnDetectionType: string;
+  turnDetectionThreshold: number;
+  turnDetectionSilenceDurationMs: number;
+}
+```
+
+```
+PUT /api/llm-provider/voice/asr
+```
+
+**请求体**（`AsrConfigRequest`，所有字段可选）：
+```json
+{
+  "url": "wss://asr-url",
+  "model": "asr-model",
+  "apiKey": "sk-xxx"
+}
+```
+
+```
+GET /api/llm-provider/voice/tts
+```
+
+**响应**（`TtsConfig`）：
+```typescript
+interface TtsConfig {
+  model: string;
+  maskedApiKey: string;
+  voice: string;
+  format: string;
+  sampleRate: number;
+  mode: string;
+  languageType: string;
+  speechRate: number;
+  volume: number;
+}
+```
+
+```
+PUT /api/llm-provider/voice/tts
+```
+
+**请求体**（`TtsConfigRequest`，所有字段可选）
+
+```
+POST /api/llm-provider/voice/asr/test
+```
+
+**响应**：同 `ProviderTestResult`
+
+---
+
+## 实现状态
+
+| 模块 | 状态 | 备注 |
+|------|------|------|
+| 简历上传/列表/详情/删除/重分析 | ✅ 已实现 | 含 Tika 解析 + AI 分析 |
+| 简历 PDF 导出 | ✅ 已实现 | iText 8 |
+| **模拟面试核心流程** | 🚧 实现中 | 会话创建/答题/报告（第1组Entity/Repo已完成） |
+| 面试历史/详情/删除 | ❌ 未实现 | 依赖面试模块完成 |
+| 知识库 CRUD + 向量化 | ❌ 未实现 | 需 pgvector |
+| 知识库 RAG 查询（流式+非流式） | ❌ 未实现 | 需 pgvector |
+| RAG 对话 | ❌ 未实现 | 依赖知识库 |
+| 技能管理 | ❌ 未实现 | Skill 定义 + JD 解析 |
+| 面试日程 | ❌ 未实现 | 含邀请解析 |
+| 语音面试（REST + WebSocket） | ❌ 未实现 | 需 ASR/TTS |
+| LLM Provider 管理 | ❌ 未实现 | 多 Provider 路由 |

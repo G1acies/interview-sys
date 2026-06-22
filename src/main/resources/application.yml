@@ -32,6 +32,16 @@ spring:
       max-file-size: 20MB
       max-request-size: 50MB
 
+  # Redis — 面试会话缓存 + 消息队列
+  redis:
+    redisson:
+      config: |
+        singleServerConfig:
+          address: "redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}"
+          database: 0
+          connectionMinimumIdleSize: 4
+          connectionPoolSize: 16
+
   # Spring AI — DashScope (OpenAI 兼容)
   ai:
     openai:
