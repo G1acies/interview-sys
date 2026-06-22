@@ -56,6 +56,34 @@
 
 后端应尽量返回业务友好的错误信息，前端统一通过 `message` 字段展示给用户。
 
+### 响应结构速查
+
+`data` 字段的具体形态由接口决定，共三种模式：
+
+| 模式 | `data` 的类型 | 对应前端代码 | 示例 |
+|------|:-:|------|------|
+| **单对象** | `T`（一个 JSON 对象） | `const item: T = await request.get<T>(...)` | 简历详情、面试会话信息 |
+| **数组** | `T[]`（JSON 数组 `[...]`） | `const list: T[] = await request.get<T[]>(...)` | 简历列表、所有会话 |
+| **空** | `null` | `await request.delete(...)` / `request.post(...)` | 删除、重新分析 |
+
+**复杂嵌套**：当接口返回由多个类组成的数据时，`data` 是一个外层对象，内部包含多个命名字段，每个字段可以是对象或数组。例如 `POST /api/resumes/upload` 返回：
+
+```
+data ─┬─ storage ─┬─ fileKey: string
+      │           ├─ fileUrl: string
+      │           └─ resumeId: number
+      │
+      ├─ analysis? ─┬─ overallScore: number
+      │              ├─ scoreDetail: {…}
+      │              ├─ strengths: string[]
+      │              └─ suggestions: {…}[]
+      │
+      ├─ duplicate?: boolean
+      └─ message?: string
+```
+
+每个接口的响应章节都会明确标注属于哪种模式。
+
 ---
 
 ## 1. 简历模块
@@ -66,7 +94,9 @@
 GET /api/resumes/health
 ```
 
-**响应**：
+**data层级**: 单对象 `{status, service}`
+
+**响应完整 JSON**：
 ```json
 {
   "code": 200,
@@ -98,39 +128,29 @@ POST /api/resumes/upload
 
 **超时**: 300s
 
-**响应**（`UploadResponse`）：
-```typescript
-interface UploadResponse {
-  storage: {
-    fileKey: string;     // MinIO 存储键，如 "resumes/2026/06/21/xxx_简历.pdf"
-    fileUrl: string;     // 文件访问 URL
-    resumeId: number;    // 简历 ID
-  };
-  analysis?: ResumeAnalysisResponse | null;  // AI 分析结果（可能为 null）
-  duplicate?: boolean;   // 是否重复文件
-  message?: string;
-}
+**data层级**: **复杂嵌套对象** — `data` 包含 `storage`（对象）+ `analysis?`（嵌套对象）+ `duplicate?`（布尔值）
 
-interface ResumeAnalysisResponse {
-  overallScore: number;               // 总分 0-100
-  scoreDetail: {
-    contentScore: number;              // 内容完整性 0-25
-    structureScore: number;            // 结构清晰度 0-20
-    skillMatchScore: number;           // 技能匹配度 0-25
-    expressionScore: number;           // 表达专业性 0-15
-    projectScore: number;              // 项目经验 0-15
-  };
-  summary: string;                     // 简历摘要
-  strengths: string[];                 // 优点列表
-  suggestions: Array<{                 // 改进建议
-    category: string;                  //   类别：内容/格式/技能/项目等
-    priority: '高' | '中' | '低';     //   优先级
-    issue: string;                     //   问题描述
-    recommendation: string;            //   具体建议
-  }>;
-  originalText: string;                // 原始简历文本
-}
 ```
+data ─┬─ storage ─┬─ fileKey: string    ← MinIO 存储键，如 "resumes/2026/06/21/xxx.pdf"
+      │           ├─ fileUrl: string    ← 文件访问 URL
+      │           └─ resumeId: number   ← 简历 ID
+      │
+      ├─ analysis? ─┬─ overallScore: number      ← 总分 0-100
+      │              ├─ scoreDetail ─┬─ contentScore     ← 内容完整性 0-25
+      │              │               ├─ structureScore   ← 结构清晰度 0-20
+      │              │               ├─ skillMatchScore  ← 技能匹配度 0-25
+      │              │               ├─ expressionScore  ← 表达专业性 0-15
+      │              │               └─ projectScore     ← 项目经验 0-15
+      │              ├─ summary: string               ← 简历摘要
+      │              ├─ strengths: string[]            ← 优点列表
+      │              ├─ suggestions: {category, priority, issue, recommendation}[]
+      │              └─ originalText: string           ← 原始文本
+      │
+      ├─ duplicate?: boolean   ← 是否重复文件
+      └─ message?: string
+```
+
+> **为什么不是 `data: UploadResponse` 一个对象？** — 因为 `analysis` 是异步结果，上传时可能是 `null`，前端用可选链 `?.` 安全访问。
 
 ---
 
@@ -140,22 +160,45 @@ interface ResumeAnalysisResponse {
 GET /api/resumes
 ```
 
-**响应**（`ResumeListItem[]`）：
-```typescript
-interface ResumeListItem {
-  id: number;
-  filename: string;
-  fileSize: number;              // 字节
-  uploadedAt: string;            // ISO 8601
-  accessCount: number;
-  latestScore?: number;          // 最新评分 0-100
-  lastAnalyzedAt?: string;
-  interviewCount: number;
-  analyzeStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-  analyzeError?: string;
-  storageUrl?: string;
+**data层级**: **数组** `data: ResumeListItem[]`
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {
+      "id": 1,
+      "filename": "张三_Java_3年.pdf",
+      "fileSize": 204800,
+      "uploadedAt": "2026-06-21T10:30:00",
+      "accessCount": 5,
+      "latestScore": 78,
+      "lastAnalyzedAt": "2026-06-21T10:35:00",
+      "interviewCount": 2,
+      "analyzeStatus": "COMPLETED",
+      "analyzeError": null,
+      "storageUrl": "http://..."
+    }
+  ]
 }
 ```
+
+**字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | number | ✅ | 主键 |
+| `filename` | string | ✅ | 文件名 |
+| `fileSize` | number | ✅ | 字节 |
+| `uploadedAt` | string | ✅ | ISO 8601 |
+| `accessCount` | number | ✅ | 访问次数 |
+| `latestScore` | number | ❌ | 最新评分 0-100 |
+| `lastAnalyzedAt` | string | ❌ | 最近分析时间 |
+| `interviewCount` | number | ✅ | 关联面试次数 |
+| `analyzeStatus` | enum | ❌ | PENDING / PROCESSING / COMPLETED / FAILED |
+| `analyzeError` | string | ❌ | 分析失败原因 |
+| `storageUrl` | string | ❌ | 文件 URL |
 
 ---
 
@@ -165,37 +208,27 @@ interface ResumeListItem {
 GET /api/resumes/{id}/detail
 ```
 
-**响应**（`ResumeDetail`）：
-```typescript
-interface ResumeDetail {
-  id: number;
-  filename: string;
-  fileSize: number;
-  contentType: string;          // MIME 类型
-  storageUrl: string;
-  uploadedAt: string;
-  accessCount: number;
-  resumeText: string;           // Tika 解析出的纯文本
-  analyzeStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-  analyzeError?: string;
-  analyses: AnalysisItem[];     // 分析记录
-  interviews: InterviewItem[];  // 关联的面试记录
-}
+**data层级**: **复杂嵌套对象** — `data` 是一个大对象，内部包含多个数组字段
 
-interface AnalysisItem {
-  id: number;
-  overallScore: number;         // 总分 0-100
-  contentScore: number;         // 内容完整性 0-25
-  structureScore: number;       // 结构清晰度 0-20
-  skillMatchScore: number;      // 技能匹配度 0-25
-  expressionScore: number;      // 表达专业性 0-15
-  projectScore: number;         // 项目经验 0-15
-  summary: string;
-  analyzedAt: string;
-  strengths: string[];
-  suggestions: unknown[];
-}
 ```
+data ─┬─ id: number
+      ├─ filename: string
+      ├─ fileSize: number
+      ├─ contentType: string
+      ├─ storageUrl: string
+      ├─ uploadedAt: string
+      ├─ accessCount: number
+      ├─ resumeText: string            ← Tika 解析出的纯文本
+      ├─ analyzeStatus?: string        ← PENDING / PROCESSING / COMPLETED / FAILED
+      ├─ analyzeError?: string
+      ├─ analyses: AnalysisItem[]      ← 数组：分析记录列表
+      |    └─ each: {id, overallScore, contentScore, structureScore,
+      |               skillMatchScore, expressionScore, projectScore,
+      |               summary, analyzedAt, strengths, suggestions}
+      └─ interviews: InterviewItem[]   ← 数组：关联的面试记录列表
+```
+
+> **关键**：`data` 下有两个独立的子数组 `analyses` 和 `interviews`，前端分别遍历展示。
 
 ---
 
@@ -205,7 +238,8 @@ interface AnalysisItem {
 GET /api/resumes/statistics
 ```
 
-**响应**：
+**data层级**: **单对象** `data: ResumeStats`
+
 ```typescript
 interface ResumeStats {
   totalCount: number;            // 简历总数
@@ -222,7 +256,9 @@ interface ResumeStats {
 POST /api/resumes/{id}/reanalyze
 ```
 
-无请求体。返回 `void`（`data: null`）。
+**data层级**: **空** `data: null`
+
+无请求体。返回 `{"code":200,"message":"success","data":null}`。
 
 ---
 
@@ -232,7 +268,7 @@ POST /api/resumes/{id}/reanalyze
 DELETE /api/resumes/{id}
 ```
 
-返回 `void`（`data: null`）。
+**data层级**: **空** `data: null`
 
 > ⚠️ 删除简历时应同时删除关联的面试会话和答案。
 
@@ -244,7 +280,7 @@ DELETE /api/resumes/{id}
 GET /api/resumes/{resumeId}/export
 ```
 
-**不同之处**：此接口不走统一的 Result 包装，直接返回二进制 PDF。
+**不同之处**：此接口**不走统一的 Result 包装**，直接返回二进制 PDF。
 
 | 响应头 | 值 |
 |--------|-----|
@@ -263,22 +299,45 @@ GET /api/resumes/{resumeId}/export
 GET /api/interview/sessions
 ```
 
-**响应**（`TextSessionMeta[]`）：
-```typescript
-interface TextSessionMeta {
-  sessionId: string;                 // UUID
-  skillId: string;                   // 面试方向，如 "java-backend"
-  difficulty: string;                // 难度 junior / mid / senior
-  resumeId: number | null;           // 关联简历 ID（通用面试为 null）
-  totalQuestions: number;
-  status: 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'EVALUATED';
-  evaluateStatus: string | null;     // null | PENDING | PROCESSING | COMPLETED | FAILED
-  evaluateError: string | null;
-  overallScore: number | null;       // 总分 0-100
-  createdAt: string;
-  completedAt: string | null;
+**data层级**: **数组** `data: TextSessionMeta[]`
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {
+      "sessionId": "uuid-xxx",
+      "skillId": "java-backend",
+      "difficulty": "mid",
+      "resumeId": 1,
+      "totalQuestions": 5,
+      "status": "COMPLETED",
+      "evaluateStatus": "COMPLETED",
+      "evaluateError": null,
+      "overallScore": 78,
+      "createdAt": "2026-06-21T10:30:00",
+      "completedAt": "2026-06-21T11:00:00"
+    }
+  ]
 }
 ```
+
+**字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `sessionId` | string | ✅ | UUID |
+| `skillId` | string | ✅ | 面试方向，如 "java-backend" |
+| `difficulty` | string | ✅ | junior / mid / senior |
+| `resumeId` | number\|null | ✅ | 关联简历 ID（通用面试为 null） |
+| `totalQuestions` | number | ✅ | 题目总数 |
+| `status` | enum | ✅ | CREATED / IN_PROGRESS / COMPLETED / EVALUATED |
+| `evaluateStatus` | string\|null | ❌ | null / PENDING / PROCESSING / COMPLETED / FAILED |
+| `evaluateError` | string\|null | ❌ | 评估失败原因 |
+| `overallScore` | number\|null | ❌ | 总分 0-100 |
+| `createdAt` | string | ✅ | ISO 8601 |
+| `completedAt` | string\|null | ❌ | 面试完成时间 |
 
 ---
 
@@ -290,48 +349,76 @@ POST /api/interview/sessions
 
 **Content-Type**: `application/json`
 
-**请求体**（`CreateInterviewRequest`）：
-```typescript
-interface CreateInterviewRequest {
-  resumeText: string;                // 简历文本（可选，无简历时传空串）
-  questionCount: number;             // 题目数量 3-20
-  resumeId?: number;                 // 简历 ID（可选）
-  forceCreate?: boolean;             // 是否强制创建新会话（忽略未完成会话）
-  llmProvider?: string;              // LLM 提供商标识
-  skillId: string;                   // 面试主题 ID，如 "java-backend"
-  difficulty?: string;               // 难度 junior / mid / senior
-  customCategories?: CategoryDTO[];  // 自定义分类（JD 解析结果）
-  jdText?: string;                   // JD 原文
+**data层级**: **单对象** `data: InterviewSession`
+
+**请求体**：
+```json
+{
+  "resumeText": "张三，3年Java开发经验...",
+  "questionCount": 5,
+  "resumeId": 1,
+  "skillId": "java-backend",
+  "difficulty": "mid"
 }
 ```
 
+**请求体字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `resumeText` | string | ❌ | 简历文本（无简历时传空串） |
+| `questionCount` | number | ✅ | 题目数量 3-20 |
+| `resumeId` | number | ❌ | 简历 ID |
+| `forceCreate` | boolean | ❌ | 强制创建新会话，忽略未完成会话 |
+| `llmProvider` | string | ❌ | LLM 提供商标识，如 "dashscope" |
+| `skillId` | string | ✅ | 面试主题 ID，如 "java-backend" |
+| `difficulty` | string | ❌ | junior / mid / senior |
+| `customCategories` | CategoryDTO[] | ❌ | 自定义分类（JD 解析结果） |
+| `jdText` | string | ❌ | JD 原文 |
+
 **超时**: 180s（AI 出题需要时间）
 
-**响应**（`InterviewSession`）：
-```typescript
-interface InterviewSession {
-  sessionId: string;
-  resumeText: string;
-  totalQuestions: number;
-  currentQuestionIndex: number;      // 当前题号（从 0 开始）
-  questions: InterviewQuestion[];
-  status: 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'EVALUATED';
+**响应**：
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "sessionId": "uuid-xxx",
+    "resumeText": "张三，3年Java开发经验...",
+    "totalQuestions": 5,
+    "currentQuestionIndex": 0,
+    "questions": [
+      {
+        "questionIndex": 0,
+        "question": "Java 中 HashMap 的底层实现是什么？",
+        "type": "JAVA",
+        "category": "Java 集合",
+        "userAnswer": null,
+        "score": null,
+        "feedback": null
+      }
+    ],
+    "status": "CREATED"
+  }
 }
+```
 
-interface InterviewQuestion {
-  questionIndex: number;
-  question: string;                  // 题目原文
-  type: string;                      // 题型分类，如 "JAVA"、"MYSQL"
-  category: string;                  // 更细粒度的类别
-  userAnswer: string | null;
-  score: number | null;
-  feedback: string | null;
-}
+**data 结构图**：
+```
+data ─┬─ sessionId: string
+      ├─ resumeText: string
+      ├─ totalQuestions: number
+      ├─ currentQuestionIndex: number
+      ├─ questions: InterviewQuestion[]  ← 数组：完整题目列表
+      |    └─ each: {questionIndex, question, type, category,
+      |               userAnswer, score, feedback}
+      └─ status: enum
 ```
 
 **说明**：
 - 前端期望创建时返回完整的 `questions` 列表（含已生成的所有题目）
-- 有 `resumeId` 时，若存在未完成的会话且 `forceCreate` 不为 `true`，应用返回已有会话
+- 有 `resumeId` 时，若存在未完成的会话且 `forceCreate` 不为 `true`，后端应返回已有会话
 
 ---
 
@@ -341,7 +428,7 @@ interface InterviewQuestion {
 GET /api/interview/sessions/{sessionId}
 ```
 
-**响应**：同 `InterviewSession`（见 2.2）
+**data层级**: **单对象** `data: InterviewSession`（同 2.2）
 
 ---
 
@@ -351,14 +438,34 @@ GET /api/interview/sessions/{sessionId}
 GET /api/interview/sessions/{sessionId}/question
 ```
 
-**响应**（`CurrentQuestionResponse`）：
-```typescript
-interface CurrentQuestionResponse {
-  completed: boolean;                // 是否已答完所有题
-  question?: InterviewQuestion;      // 当前题目（未完成时有值）
-  message?: string;                  // 已完成时的提示信息
+**data层级**: **单对象** `data: CurrentQuestionResponse`
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "completed": false,
+    "question": {
+      "questionIndex": 2,
+      "question": "请解释 Java 中 volatile 关键字的作用",
+      "type": "JAVA",
+      "category": "Java 并发",
+      "userAnswer": null,
+      "score": null,
+      "feedback": null
+    }
+  }
 }
 ```
+
+**字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `completed` | boolean | ✅ | 是否已答完所有题 |
+| `question` | object\|null | ❌ | 当前题目（completed=false 时有值） |
+| `message` | string | ❌ | 已完成时的提示信息 |
 
 ---
 
@@ -368,25 +475,48 @@ interface CurrentQuestionResponse {
 POST /api/interview/sessions/{sessionId}/answers
 ```
 
+**data层级**: **单对象** `data: SubmitAnswerResponse`
+
 **请求体**：
 ```json
 {
   "questionIndex": 0,
-  "answer": "我的回答内容..."
+  "answer": "HashMap 底层是数组+链表+红黑树..."
 }
 ```
 
 **超时**: 180s（AI 评估单题需要时间）
 
-**响应**（`SubmitAnswerResponse`）：
-```typescript
-interface SubmitAnswerResponse {
-  hasNextQuestion: boolean;              // 是否还有下一题
-  nextQuestion: InterviewQuestion | null; // 下一题（hasNextQuestion=true 时有值）
-  currentIndex: number;                  // 当前已答题号
-  totalQuestions: number;                // 总题数
+**响应**：
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "hasNextQuestion": true,
+    "nextQuestion": {
+      "questionIndex": 1,
+      "question": "ConcurrentHashMap 如何保证线程安全？",
+      "type": "JAVA",
+      "category": "Java 并发",
+      "userAnswer": null,
+      "score": null,
+      "feedback": null
+    },
+    "currentIndex": 0,
+    "totalQuestions": 5
+  }
 }
 ```
+
+**字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `hasNextQuestion` | boolean | ✅ | 是否还有下一题（false = 已答完） |
+| `nextQuestion` | object\|null | ❌ | 下一题信息 |
+| `currentIndex` | number | ✅ | 当前已答题号 |
+| `totalQuestions` | number | ✅ | 总题数 |
 
 ---
 
@@ -396,6 +526,8 @@ interface SubmitAnswerResponse {
 PUT /api/interview/sessions/{sessionId}/answers
 ```
 
+**data层级**: **空** `data: null`
+
 **请求体**：
 ```json
 {
@@ -404,9 +536,7 @@ PUT /api/interview/sessions/{sessionId}/answers
 }
 ```
 
-**说明**：仅保存不评估，不推进 `currentQuestionIndex`。
-
-**响应**：`void`
+**说明**：仅保存不评估，不推进 `currentQuestionIndex`。用于前端防丢失草稿。
 
 ---
 
@@ -416,38 +546,63 @@ PUT /api/interview/sessions/{sessionId}/answers
 GET /api/interview/sessions/{sessionId}/report
 ```
 
-**超时**: 180s（AI 评估需要时间）
+**data层级**: **复杂嵌套对象** `data: InterviewReport`
 
-**响应**（`InterviewReport`）：
-```typescript
-interface InterviewReport {
-  sessionId: string;
-  totalQuestions: number;
-  overallScore: number;                  // 总分 0-100
-  categoryScores: Array<{                // 各类别得分
-    category: string;
-    score: number;
-    questionCount: number;
-  }>;
-  questionDetails: Array<{               // 每题评估
-    questionIndex: number;
-    question: string;
-    category: string;
-    userAnswer: string;
-    score: number;
-    feedback: string;
-  }>;
-  overallFeedback: string;               // 总体评语
-  strengths: string[];                   // 优势
-  improvements: string[];                // 改进建议
-  referenceAnswers: Array<{              // 参考答案
-    questionIndex: number;
-    question: string;
-    referenceAnswer: string;
-    keyPoints: string[];
-  }>;
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "sessionId": "uuid-xxx",
+    "totalQuestions": 5,
+    "overallScore": 78,
+    "categoryScores": [
+      {"category": "JAVA", "score": 80, "questionCount": 2},
+      {"category": "MYSQL", "score": 70, "questionCount": 2},
+      {"category": "PROJECT", "score": 85, "questionCount": 1}
+    ],
+    "questionDetails": [
+      {
+        "questionIndex": 0,
+        "question": "HashMap 的底层实现？",
+        "category": "JAVA",
+        "userAnswer": "数组+链表+红黑树",
+        "score": 85,
+        "feedback": "回答准确，但可补充负载因子说明"
+      }
+    ],
+    "overallFeedback": "候选人Java基础扎实...",
+    "strengths": ["Java 并发理解深入", "项目经验丰富"],
+    "improvements": ["MySQL 索引优化可进一步学习"],
+    "referenceAnswers": [
+      {
+        "questionIndex": 0,
+        "question": "HashMap 的底层实现？",
+        "referenceAnswer": "HashMap 底层是数组...",
+        "keyPoints": ["数组+链表", "红黑树", "负载因子"]
+      }
+    ]
+  }
 }
 ```
+
+**data 结构图**：
+```
+data ─┬─ sessionId: string
+      ├─ totalQuestions: number
+      ├─ overallScore: number                     ← 总分 0-100
+      ├─ categoryScores: CategoryScore[]          ← 数组：各类别得分
+      |    └─ each: {category, score, questionCount}
+      ├─ questionDetails: QuestionEvaluation[]    ← 数组：每题评估
+      |    └─ each: {questionIndex, question, category, userAnswer, score, feedback}
+      ├─ overallFeedback: string                  ← 总体评语
+      ├─ strengths: string[]                      ← 优势列表
+      ├─ improvements: string[]                   ← 改进建议
+      └─ referenceAnswers: ReferenceAnswer[]      ← 数组：参考答案
+           └─ each: {questionIndex, question, referenceAnswer, keyPoints}
+```
+
+**超时**: 180s（AI 评估需要时间）
 
 ---
 
@@ -457,10 +612,9 @@ interface InterviewReport {
 GET /api/interview/sessions/unfinished/{resumeId}
 ```
 
-**说明**：前端在进入面试页面时会先调此接口，有未完成会话则直接恢复。
+**data层级**: **单对象或空** — 有未完成会话时同 `InterviewSession`（2.2），无时 `data: null`
 
-**响应**：同 `InterviewSession`（见 2.2）
-- **无未完成会话时**：返回 HTTP 200 + `data: null`（前端 `try/catch` 处理）
+**说明**：前端在进入面试页面时会先调此接口，有未完成会话则直接恢复。
 
 ---
 
@@ -470,10 +624,10 @@ GET /api/interview/sessions/unfinished/{resumeId}
 POST /api/interview/sessions/{sessionId}/complete
 ```
 
+**data层级**: **空** `data: null`
+
 **说明**：未答完所有题时提前结束，将状态置为 `COMPLETED`，
 触发异步评估（通过 Redis Stream 发送评估任务）。
-
-**响应**：`void`
 
 ---
 
@@ -483,37 +637,26 @@ POST /api/interview/sessions/{sessionId}/complete
 GET /api/interview/sessions/{sessionId}/details
 ```
 
-**响应**（`InterviewDetail`）：
-```typescript
-interface InterviewDetail {
-  id: number;
-  sessionId: string;
-  totalQuestions: number;
-  status: string;
-  evaluateStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
-  evaluateError?: string;
-  overallScore: number | null;
-  overallFeedback: string | null;
-  createdAt: string;
-  completedAt: string | null;
-  questions: unknown[];                  // 题目列表（原始 JSON）
-  strengths: string[];                   // 优势列表
-  improvements: string[];                // 改进建议
-  referenceAnswers: unknown[];           // 参考答案
-  answers: AnswerItem[];                 // 每题详情
-}
+**data层级**: **复杂嵌套对象** `data: InterviewDetail`
 
-interface AnswerItem {
-  questionIndex: number;
-  question: string;
-  category: string;
-  userAnswer: string;
-  score: number;
-  feedback: string;
-  referenceAnswer?: string;
-  keyPoints?: string[];
-  answeredAt: string;
-}
+```
+data ─┬─ id: number
+      ├─ sessionId: string
+      ├─ totalQuestions: number
+      ├─ status: string
+      ├─ evaluateStatus?: string          ← PENDING/PROCESSING/COMPLETED/FAILED
+      ├─ evaluateError?: string
+      ├─ overallScore: number | null
+      ├─ overallFeedback: string | null
+      ├─ createdAt: string
+      ├─ completedAt: string | null
+      ├─ questions: unknown[]             ← 题目列表（原始 JSON）
+      ├─ strengths: string[]              ← 优势列表
+      ├─ improvements: string[]           ← 改进建议
+      ├─ referenceAnswers: unknown[]      ← 参考答案
+      └─ answers: AnswerItem[]            ← 数组：每题详情
+           └─ each: {questionIndex, question, category, userAnswer, score,
+                     feedback, referenceAnswer?, keyPoints?, answeredAt}
 ```
 
 ---
@@ -524,7 +667,7 @@ interface AnswerItem {
 GET /api/interview/sessions/{sessionId}/export
 ```
 
-同简历导出（1.8），不走 Result 包装，直接返回二进制 PDF。
+**data层级**: **不适用** — 不走 Result 包装，直接返回二进制 PDF。
 
 | 响应头 | 值 |
 |--------|-----|
@@ -539,7 +682,9 @@ GET /api/interview/sessions/{sessionId}/export
 DELETE /api/interview/sessions/{sessionId}
 ```
 
-**说明**：级联删除关联的答案。返回 `void`。
+**data层级**: **空** `data: null`
+
+**说明**：级联删除关联的答案。
 
 ---
 
@@ -551,31 +696,45 @@ DELETE /api/interview/sessions/{sessionId}
 GET /api/interview/skills
 ```
 
-**响应**（`SkillDTO[]`）：
-```typescript
-interface SkillDTO {
-  id: string;                            // 技能标识符，如 "java-backend"
-  name: string;                          // 显示名称
-  description: string;                   // 描述
-  categories: CategoryDTO[];             // 分类列表
-  isPreset: boolean;                     // 是否预设技能
-  sourceJd: string | null;               // JD 原文（自定义技能时有值）
-  persona?: string;                      // 面试官角色设定
-  display?: {                            // 前端展示配置
-    icon: string;
-    gradient: string;
-    iconBg: string;
-    iconColor: string;
-  };
-}
+**data层级**: **数组** `data: SkillDTO[]`
 
-interface CategoryDTO {
-  key: string;                           // 分类键，如 "JAVA"
-  label: string;                         // 显示标签，如 "Java 基础"
-  priority: 'CORE' | 'NORMAL' | 'ALWAYS_ONE';
-  ref?: string;                          // 关联的参考文件
-  shared?: boolean;                      // 是否共享分类
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {
+      "id": "java-backend",
+      "name": "Java 后端",
+      "description": "Java 后端开发面试",
+      "categories": [
+        {"key": "JAVA", "label": "Java 基础", "priority": "CORE"},
+        {"key": "SPRING", "label": "Spring 框架", "priority": "CORE"},
+        {"key": "MYSQL", "label": "MySQL", "priority": "NORMAL"}
+      ],
+      "isPreset": true,
+      "sourceJd": null,
+      "persona": "你是资深 Java 技术专家...",
+      "display": {
+        "icon": "☕",
+        "gradient": "from-orange-400 to-red-500",
+        "iconBg": "bg-orange-100",
+        "iconColor": "text-orange-600"
+      }
+    }
+  ]
 }
+```
+
+**data 结构图**：
+```
+data: SkillDTO[]            ← 数组
+  └─ each: {
+       id, name, description,
+       categories: CategoryDTO[]  ← 内嵌数组
+       isPreset, sourceJd,
+       persona?, display?
+     }
 ```
 
 ---
@@ -586,7 +745,7 @@ interface CategoryDTO {
 GET /api/interview/skills/{id}
 ```
 
-**响应**：同 `SkillDTO`（见 3.1）
+**data层级**: **单对象** `data: SkillDTO`（同上）
 
 ---
 
@@ -596,6 +755,8 @@ GET /api/interview/skills/{id}
 POST /api/interview/skills/parse-jd
 ```
 
+**data层级**: **数组** `data: CategoryDTO[]`
+
 **请求体**：
 ```json
 {
@@ -603,7 +764,17 @@ POST /api/interview/skills/parse-jd
 }
 ```
 
-**响应**（`CategoryDTO[]`）：同 `CategoryDTO`（见 3.1）
+**响应**：
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {"key": "JAVA", "label": "Java 基础", "priority": "CORE"},
+    {"key": "SPRING", "label": "Spring Boot", "priority": "CORE"}
+  ]
+}
+```
 
 ---
 
@@ -1607,3 +1778,118 @@ POST /api/llm-provider/voice/asr/test
 | 面试日程 | ❌ 未实现 | 含邀请解析 |
 | 语音面试（REST + WebSocket） | ❌ 未实现 | 需 ASR/TTS |
 | LLM Provider 管理 | ❌ 未实现 | 多 Provider 路由 |
+
+---
+
+ ## 需要按顺序创建的 5 组代码
+
+### 第一组：基础模型 + Repository（持久化基石）
+
+文件: AsyncTaskStatus.java
+说明: 通用枚举 PENDING/PROCESSING/COMPLETED/FAILED
+
+文件: CommonConstants.java（新增 InterviewDefaults）
+说明: 面试默认值 SKILL_ID, DIFFICULTY
+
+文件: InterviewSessionEntity.java
+说明: JPA 实体 — 面试会话表
+
+文件: InterviewAnswerEntity.java
+说明: JPA 实体 — 面试答案表
+
+文件: InterviewSessionRepository.java
+说明: JPA Repository（按 sessionId / resumeId 查询）
+
+文件: InterviewAnswerRepository.java
+说明: JPA Repository（按 session + questionIndex 查询）
+
+### 第二组：所有 Model/Request/Response/Record
+
+文件: CreateInterviewRequest.java
+说明: 创建会话请求体
+
+文件: SubmitAnswerRequest.java
+说明: 提交答案请求体
+
+文件: SubmitAnswerResponse.java
+说明: 提交答案响应（hasNextQuestion, nextQuestion 等）
+
+文件: SessionListItemDTO.java
+说明: 列表项 DTO（含 from() 工厂方法）
+
+文件: InterviewDetailDTO.java
+说明: 详情 DTO（含嵌套 AnswerDetailDTO）
+
+文件: InterviewReportDTO.java
+说明: 评估报告 DTO（含 CategoryScore, QuestionEvaluation, ReferenceAnswer）
+
+文件: HistoricalQuestion.java
+说明: 历史题目 record（出题去重用）
+
+文件: InterviewHistoryItemDTO.java
+说明: 简历详情页关联的面试记录 DTO
+
+### 第三组：AI 评估基础设施（跨模块通用）
+
+ 文件                               说明
+ ────────────────────────────────── ──────────────────────────────────
+ UnifiedEvaluationService.java      统一的批次评估 + 二次汇总服务
+ EvaluationReport.java              通用评估报告 record
+ QaRecord.java                      通用问答记录 record
+ InterviewEvaluationProperties.java 评估配置（batchSize, prompt 路径）
+
+### 第四组：面试核心 Service + Controller
+
+文件: InterviewPersistenceService.java
+说明: 持久化层 — 保存会话、答案、报告、查找历史题目
+
+文件: InterviewQuestionProperties.java
+说明: 出题配置（prompt 路径、follow-up 数量）
+
+文件: InterviewQuestionService.java
+说明: AI 出题 — 有简历/无简历双模式、并行生成、追问题
+
+文件: AnswerEvaluationService.java
+说明: DTO 适配器 — 调用 UnifiedEvaluationService
+
+文件: InterviewSessionService.java
+说明: 核心 — 会话生命周期（创建、答题、交卷、报告），用到 Redis 缓存
+
+文件: InterviewHistoryService.java
+说明: 会话详情 + PDF 导出
+
+文件: InterviewController.java
+说明: 11 个 REST 接口（映射到前端 interviewApi）
+
+### 第五组：异步评估（Redis Stream）
+
+ 文件                          说明
+ ───────────────────────────── ────────────────────────────────────────────────────────
+ AsyncTaskStreamConstants.java Stream key/group/field 常量
+ AbstractStreamProducer.java   生产者模板
+ AbstractStreamConsumer.java   消费者模板
+ EvaluateStreamProducer.java   面试评估任务生产者
+ EvaluateStreamConsumer.java   面试评估任务消费者（反序列化问题 → 调用评估 → 保存报告）
+
+ 第六组：可选但依赖的周边
+
+ 文件                          说明
+ ───────────────────────────── ───────────────────────────────────────────────
+ InterviewMapper.java          MapStruct 映射器（Entity → DTO）
+ InterviewSkillService.java    Skill 管理（分类分配、JD 解析、Reference 注入）
+ InterviewSkillProperties.java Skill 配置定义
+ InterviewSkillController.java Skill 查询接口
+ Prompt 模板（8 个 .st 文件）  resources/prompts/ 目录下的面试出题和评估提示词
+
+ ─────────────────────────────────────────────────────────────────────────────────────────────
+
+ 推荐实施顺序
+
+ 1. 第一组（实体/Repository）→ 建表基础
+ 2. 第二组（Model records）→ 数据传输对象
+ 3. 第三组（统一评估）→ AI 评估引擎
+ 4. 第四组（Service + Controller 配齐前七步：Persistence → Question → AnswerEval → Session → History
+     → 然后 Controller）→ 核心业务流程
+
+ 5. 第五组（异步评估）→ 完成后  POST /complete  触发异步评估报告生成
+ 6. 第六组（Skill/Mapper/Prompt）→ 按需补全
