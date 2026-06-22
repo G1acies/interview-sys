@@ -1,5 +1,6 @@
 package interview.guide.modules.resume.controller;
 
+import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.result.Result;
 import interview.guide.infrastructure.file.DocumentParseService;
 import interview.guide.infrastructure.file.FileStorageService;
@@ -49,11 +50,15 @@ public class ResumeController {
             String analyzeStatus,
             String analyzeError,
             String storageUrl
-    ) {}
+    ) {
+    }
 
     // 上传响应
-    public record UploadStorageInfo(String fileKey, String fileUrl, Long resumeId) {}
-    public record UploadResponse(UploadStorageInfo storage) {}
+    public record UploadStorageInfo(String fileKey, String fileUrl, Long resumeId) {
+    }
+
+    public record UploadResponse(UploadStorageInfo storage) {
+    }
 
     // 详情响应
     public record ResumeDetail(
@@ -61,25 +66,36 @@ public class ResumeController {
             String storageUrl, String uploadedAt, int accessCount,
             String resumeText, String analyzeStatus, String analyzeError,
             List<AnalysisItem> analyses, List<InterviewItem> interviews
-    ) {}
+    ) {
+    }
+
     public record AnalysisItem(
             Long id, int overallScore, int contentScore, int structureScore,
             int skillMatchScore, int expressionScore, int projectScore,
             String summary, String analyzedAt, List<String> strengths,
             List<Object> suggestions
-    ) {}
+    ) {
+    }
+
+    // 统计
+    public record ResumeStats(int totalCount, int totalInterviewCount, int totalAccessCount) {
+    }
+
     public record InterviewItem(
             Long id, String sessionId, int totalQuestions, String status,
             String evaluateStatus, String evaluateError, Integer overallScore,
             String overallFeedback, String createdAt, String completedAt
-    ) {}
+    ) {
+    }
 
     @GetMapping("/health")
     public Result<?> health() {
         return Result.success("ok");
     }
 
-    /** 获取全部简历列表 — 前端 ResumeListItem 格式 */
+    /**
+     * 获取全部简历列表
+     */
     @GetMapping
     public Result<List<ResumeListItem>> list() {
         List<ResumeListItem> items = resumeService.listAll().stream()
@@ -88,13 +104,27 @@ public class ResumeController {
         return Result.success(items);
     }
 
-    /** 获取单条简历详情 */
+    /**
+     * 获取简历统计
+     */
+    @GetMapping("/statistics")
+    public Result<ResumeStats> statistics() {
+        ResumeStats stats = new ResumeStats(
+                (int) resumeService.count(), 0, 0);
+        return Result.success(stats);
+    }
+
+    /**
+     * 获取单条简历详情
+     */
     @GetMapping("/{id}")
     public Result<ResumeEntity> getById(@PathVariable Long id) {
         return Result.success(resumeService.getById(id));
     }
 
-    /** 删除简历记录 */
+    /**
+     * 删除简历记录
+     */
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable Long id) {
         resumeService.delete(id);
@@ -140,7 +170,9 @@ public class ResumeController {
         return Result.success(new UploadResponse(storage));
     }
 
-    /** Entity → 前端 ResumeListItem */
+    /**
+     * Entity → 前端 ResumeListItem
+     */
     private ResumeListItem toListItem(ResumeEntity e) {
         return new ResumeListItem(
                 e.getId(),
@@ -157,7 +189,9 @@ public class ResumeController {
         );
     }
 
-    /** 获取简历详情 — 前端 ResumeDetail 格式 */
+    /**
+     * 获取简历详情 — 前端 ResumeDetail 格式
+     */
     @GetMapping("/{id}/detail")
     public Result<ResumeDetail> getDetailById(@PathVariable Long id) {
         ResumeEntity e = resumeService.getDetailById(id);
@@ -218,4 +252,25 @@ public class ResumeController {
             return Collections.emptyList();
         }
     }
+
+    @PostMapping("/{id}/reanalyze")
+    public Result<Void> reanalyzeResume(@PathVariable Long id) {
+        ResumeEntity entity = resumeService.getById(id);
+        if (entity.getRawText() == null || entity.getRawText().isBlank()) {
+            return Result.error(ErrorCode.RESUME_ANALYSIS_FAILED.getCode(),
+                    "简历文本为空，无法重新分析。请重新上传文件");
+        }
+        // AI 分析
+        try {
+            String analysisJson = resumeAnalysisService.analyzeToJson(entity.getRawText());
+            resumeService.saveAnalysisResult(entity.getId(), analysisJson);
+            return Result.success();
+        } catch (Exception e) {
+            log.warn("AI 简历分析失败: id={}, error={}", entity.getId(), e.getMessage());
+            return Result.error(ErrorCode.RESUME_ANALYSIS_FAILED.getCode(),
+                    "AI 分析失败: " + e.getMessage());
+        }
+    }
+
+
 }

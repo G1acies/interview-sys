@@ -23,6 +23,10 @@ public class ResumeService {
         return resumeRepository.findAll();
     }
 
+    public long count() {
+        return resumeRepository.count();
+    }
+
     @Transactional(readOnly = true)
     public ResumeEntity getById(Long id) {
         return resumeRepository.findById(id)
@@ -84,5 +88,9 @@ public class ResumeService {
     @Transactional(readOnly = true)
     public ResumeEntity getDetailById(Long id) {
         return getById(id);
+    }
+
+    public void reanalyze(Long id) {
+
     }
 }
