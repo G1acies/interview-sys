@@ -2,11 +2,19 @@ package interview.guide.modules.interview.service;
 
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.common.result.Result;
+import interview.guide.infrastructure.redis.InterviewSessionCache;
+import interview.guide.infrastructure.redis.InterviewSessionCache.CachedSession;
 import interview.guide.modules.interview.model.CreateInterviewRequest;
+import interview.guide.modules.interview.model.CurrentQuestionResponse;
+import interview.guide.modules.interview.model.InterviewAnswerEntity;
 import interview.guide.modules.interview.model.InterviewQuestionDTO;
 import interview.guide.modules.interview.model.InterviewSessionDTO;
+import interview.guide.modules.interview.model.InterviewSessionDTO.SessionStatus;
 import interview.guide.modules.interview.model.InterviewSessionEntity;
 import interview.guide.modules.interview.model.SessionListItemDTO;
+import interview.guide.modules.interview.model.SubmitAnswerResponse;
+import interview.guide.modules.interview.repository.InterviewAnswerRepository;
 import interview.guide.modules.interview.repository.InterviewSessionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,12 +23,15 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -39,6 +50,8 @@ import java.util.UUID;
 public class InterviewService {
 
     private final InterviewSessionRepository sessionRepository;
+    private final InterviewAnswerRepository answerRepository;
+    private final InterviewSessionCache sessionCache;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
 
@@ -134,16 +147,34 @@ public class InterviewService {
         entity.setCurrentQuestionIndex(0);
         entity.setStatus(InterviewSessionEntity.SessionStatus.CREATED);
         try {
-            entity.setQuestionsJson(objectMapper.writeValueAsString(questions));
+            entity.setQuestionsJson(objectMapper.writeValueAsString(questions));    //包含了json序列化
         } catch (Exception e) {
             log.error("序列化题目列表失败: {}", e.getMessage(), e);
             throw new BusinessException(ErrorCode.INTERNAL_ERROR, "保存题目失败");
         }
 
+        // 写入db
         InterviewSessionEntity saved = sessionRepository.save(entity);
         log.info("面试会话已持久化: sessionId={}, id={}", sessionId, saved.getId());
 
-        // 5. 返回 DTO（questions 中包含完整题目列表）
+        // 5. 写入 Redis 缓存（会话状态用 DTO 的 SessionStatus）
+        try {
+            sessionCache.saveSession(
+                    sessionId,
+                    resumeText,
+                    request.resumeId(),
+                    questions,
+                    0,
+                    SessionStatus.CREATED
+            );
+            log.debug("面试会话已缓存到 Redis: sessionId={}", sessionId);
+        } catch (Exception e) {
+            // Redis 不可用不应阻断主流程，仅记录警告
+            log.warn("Redis 缓存会话失败（不影响主流程）: sessionId={}, error={}",
+                    sessionId, e.getMessage());
+        }
+
+        // 6. 返回 DTO（questions 中包含完整题目列表）
         return new InterviewSessionDTO(
                 sessionId,
                 resumeText,
@@ -152,6 +183,309 @@ public class InterviewService {
                 questions,
                 InterviewSessionDTO.SessionStatus.CREATED
         );
+    }
+
+    /**
+     * 获取面试会话信息。
+     * <p>
+     * 查询优先级：
+     * <ol>
+     *   <li><b>Redis 缓存</b> — 面试进行中的会话缓存在 Redis 中，读取最快</li>
+     *   <li><b>数据库恢复</b> — 缓存未命中时从 MySQL 加载并回填缓存</li>
+     * </ol>
+     *
+     * @param sessionId 会话唯一标识
+     * @return 面试会话 DTO（含完整题目列表）
+     * @throws BusinessException 当会话不存在时抛出 INTERVIEW_SESSION_NOT_FOUND
+     */
+    public InterviewSessionDTO getSession(String sessionId) {
+        // 1. 优先从 Redis 缓存获取
+        Optional<CachedSession> cachedOpt = sessionCache.getSession(sessionId);
+        if (cachedOpt.isPresent()) {
+            log.debug("从 Redis 缓存获取会话: sessionId={}", sessionId);
+            return toDTO(cachedOpt.get());
+        }
+
+        // 2. 缓存未命中，从数据库恢复（含答案填充 + 回填缓存）
+        CachedSession restored = restoreSessionFromDatabase(sessionId);
+        if (restored == null) {
+            throw new BusinessException(ErrorCode.INTERVIEW_SESSION_NOT_FOUND,
+                    "面试会话不存在: " + sessionId);
+        }
+
+        return toDTO(restored);
+    }
+
+    /**
+     * 获取当前题目。
+     * <p>
+     * 根据会话的 {@code currentQuestionIndex} 定位到当前应答题的题目。
+     * 如果所有题目已完成（索引越界），返回 {@code completed=true} 状态。
+     *
+     * @param sessionId 会话唯一标识
+     * @return 当前题目响应（含完成状态和题目内容）
+     * @throws BusinessException 当会话不存在时抛出 INTERVIEW_SESSION_NOT_FOUND
+     */
+    public CurrentQuestionResponse getCurrentQuestion(String sessionId) {
+        InterviewSessionDTO session = getSession(sessionId);
+
+        // 判断是否已答完所有题
+        if (session.currentQuestionIndex() >= session.questions().size()) {
+            return new CurrentQuestionResponse(
+                    true,   // completed
+                    null,   // question
+                    "所有问题已回答完毕"
+            );
+        }
+
+        // 返回当前题目（未答完时 question 不为 null）
+        InterviewQuestionDTO question = session.questions()
+                .get(session.currentQuestionIndex());
+        return new CurrentQuestionResponse(
+                false,   // completed
+                question,
+                null     // message
+        );
+    }
+
+    // ==================== 答题流程 ====================
+
+    /**
+     * 提交答案并进入下一题。
+     * <p>
+     * 处理流程：
+     * <ol>
+     *   <li>获取当前会话（优先 Redis 缓存）</li>
+     *   <li>校验 questionIndex 合法性</li>
+     *   <li>更新问题对象的 {@code userAnswer}</li>
+     *   <li>持久化答案到 MySQL（{@link InterviewAnswerEntity}）</li>
+     *   <li>更新 Redis 缓存中的问题列表和当前索引</li>
+     *   <li>返回下一题信息（或告知已完成）</li>
+     * </ol>
+     *
+     * @param sessionId     会话唯一标识
+     * @param questionIndex 当前回答的问题索引
+     * @param answer        用户作答内容
+     * @return 提交答案响应（含下一题信息或完成状态）
+     * @throws BusinessException 会话不存在 / 题目索引无效
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public SubmitAnswerResponse submitAnswer(String sessionId, Integer questionIndex, String answer) {
+        // 1. 获取会话
+        InterviewSessionDTO session = getSession(sessionId);
+
+        // 2. 校验索引
+        List<InterviewQuestionDTO> questions = session.questions();
+        if (questionIndex == null || questionIndex < 0 || questionIndex >= questions.size()) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST,
+                    "无效的问题索引: " + questionIndex);
+        }
+
+        // 3. 更新问题答案
+        InterviewQuestionDTO updated = questions.get(questionIndex).withAnswer(answer);
+        questions.set(questionIndex, updated);
+
+        log.info("提交答案: sessionId={}, questionIndex={}, 答案长度={}",
+                sessionId, questionIndex, answer != null ? answer.length() : 0);
+
+        // 4. 持久化到 MySQL（upsert：有则更新，无则新建）
+        sessionRepository.findBySessionId(sessionId).ifPresent(entity -> {
+            InterviewAnswerEntity answerEntity = answerRepository
+                    .findBySession_SessionIdAndQuestionIndex(sessionId, questionIndex)
+                    .orElseGet(() -> {
+                        InterviewAnswerEntity created = new InterviewAnswerEntity();
+                        created.setSession(entity);
+                        created.setQuestionIndex(questionIndex);
+                        return created;
+                    });
+
+            answerEntity.setQuestion(updated.question());
+            answerEntity.setCategory(updated.category());
+            answerEntity.setUserAnswer(answer);
+
+            answerRepository.save(answerEntity);
+            log.debug("答案已持久化: sessionId={}, questionIndex={}", sessionId, questionIndex);
+        });
+
+        // 5. 推进到下一题
+        int nextIndex = questionIndex + 1;
+        boolean hasNext = nextIndex < questions.size();
+
+        if (hasNext) {
+            // 更新 Redis 缓存
+            sessionCache.updateQuestions(sessionId, questions);
+            sessionCache.updateCurrentIndex(sessionId, nextIndex);
+            log.debug("已推进到下一题: sessionId={}, currentIndex={}, 还有{}题",
+                    sessionId, nextIndex, questions.size() - nextIndex);
+        } else {
+            // 已答完所有题
+            sessionCache.updateQuestions(sessionId, questions);
+            sessionCache.updateSessionStatus(sessionId, SessionStatus.COMPLETED);
+
+            // 更新 DB 状态
+            sessionRepository.findBySessionId(sessionId).ifPresent(entity -> {
+                entity.setCurrentQuestionIndex(nextIndex);
+                entity.setStatus(InterviewSessionEntity.SessionStatus.COMPLETED);
+                sessionRepository.save(entity);
+            });
+
+            log.info("所有题目已回答完毕: sessionId={}", sessionId);
+        }
+
+        // 6. 返回响应
+        InterviewQuestionDTO nextQuestion = hasNext ? questions.get(nextIndex) : null;
+        return new SubmitAnswerResponse(
+                hasNext,
+                nextQuestion,
+                questionIndex,
+                questions.size()
+        );
+    }
+
+    /**
+     * 暂存答案（不推进到下一题）。
+     * <p>
+     * 与 {@link #submitAnswer} 的区别：
+     * <ul>
+     *   <li><b>POST</b> — 提交 + 推进 currentQuestionIndex，返回下一题</li>
+     *   <li><b>PUT</b> — 仅保存，不推进，返回 {@code void}</li>
+     * </ul>
+     * 暂存用于前端防丢失草稿，用户可以在答题框中随时保存进度。
+     *
+     * @param sessionId     会话唯一标识
+     * @param questionIndex 保存答案的问题索引
+     * @param answer        答案内容
+     * @throws BusinessException 会话不存在 / 题目索引无效
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void saveAnswer(String sessionId, Integer questionIndex, String answer) {
+        // 1. 获取会话
+        InterviewSessionDTO session = getSession(sessionId);
+
+        // 2. 校验索引
+        List<InterviewQuestionDTO> questions = session.questions();
+        if (questionIndex == null || questionIndex < 0 || questionIndex >= questions.size()) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST,
+                    "无效的问题索引: " + questionIndex);
+        }
+
+        // 3. 更新问题答案
+        InterviewQuestionDTO updated = questions.get(questionIndex).withAnswer(answer);
+        questions.set(questionIndex, updated);
+
+        log.info("暂存答案: sessionId={}, questionIndex={}, 答案长度={}",
+                sessionId, questionIndex, answer != null ? answer.length() : 0);
+
+        // 4. 持久化到 MySQL（upsert）
+        sessionRepository.findBySessionId(sessionId).ifPresent(entity -> {
+            InterviewAnswerEntity answerEntity = answerRepository
+                    .findBySession_SessionIdAndQuestionIndex(sessionId, questionIndex)
+                    .orElseGet(() -> {
+                        InterviewAnswerEntity created = new InterviewAnswerEntity();
+                        created.setSession(entity);
+                        created.setQuestionIndex(questionIndex);
+                        return created;
+                    });
+
+            answerEntity.setQuestion(updated.question());
+            answerEntity.setCategory(updated.category());
+            answerEntity.setUserAnswer(answer);
+
+            answerRepository.save(answerEntity);
+            log.debug("暂存答案已持久化: sessionId={}, questionIndex={}", sessionId, questionIndex);
+        });
+
+        // 5. 更新 Redis 缓存（只更新问题列表，不推进索引）
+        sessionCache.updateQuestions(sessionId, questions);
+        log.debug("暂存答案已更新 Redis 缓存: sessionId={}", sessionId);
+    }
+
+    /**
+     * 从数据库恢复会话并缓存到 Redis。
+     * <p>
+     * 流程：
+     * <ol>
+     *   <li>按 sessionId 查询 {@link InterviewSessionEntity}（JOIN FETCH 简历避免 N+1）</li>
+     *   <li>反序列化 questionsJson → {@link List}{@literal <}{@link InterviewQuestionDTO}{@literal >}</li>
+     *   <li>写入 Redis 缓存供后续快速访问</li>
+     *   <li>返回 {@link CachedSession}</li>
+     * </ol>
+     *
+     * @param sessionId 会话唯一标识
+     * @return 缓存会话对象，数据库中也找不到时返回 null
+     */
+    private CachedSession restoreSessionFromDatabase(String sessionId) {
+        try {
+            Optional<InterviewSessionEntity> entityOpt =
+                    sessionRepository.findBySessionIdWithResume(sessionId);
+            if (entityOpt.isEmpty()) {
+                return null;
+            }
+
+            InterviewSessionEntity entity = entityOpt.get();
+
+            // 反序列化题目列表
+            List<InterviewQuestionDTO> questions = objectMapper.readValue(
+                    entity.getQuestionsJson(),
+                    new TypeReference<List<InterviewQuestionDTO>>() {}
+            );
+
+            // 从关联的简历提取文本
+            String resumeText = entity.getResume() != null
+                    ? entity.getResume().getRawText()
+                    : "";
+
+            SessionStatus status = convertStatus(entity.getStatus());
+
+            // 回填 Redis 缓存
+            sessionCache.saveSession(
+                    entity.getSessionId(),
+                    resumeText,
+                    entity.getResumeId(),
+                    questions,
+                    entity.getCurrentQuestionIndex() != null ? entity.getCurrentQuestionIndex() : 0,
+                    status
+            );
+
+            log.info("已从数据库恢复会话到 Redis: sessionId={}, status={}",
+                    sessionId, entity.getStatus());
+
+            // 从缓存中取出刚存入的数据返回
+            return sessionCache.getSession(sessionId).orElse(null);
+
+        } catch (Exception e) {
+            log.error("从数据库恢复会话失败: sessionId={}, error={}", sessionId, e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * 将 Redis {@link CachedSession} 转换为前端需要的 {@link InterviewSessionDTO}。
+     */
+    private InterviewSessionDTO toDTO(CachedSession session) {
+        List<InterviewQuestionDTO> questions = session.getQuestions(objectMapper);
+        return new InterviewSessionDTO(
+                session.getSessionId(),
+                session.getResumeText(),
+                questions.size(),
+                session.getCurrentIndex(),
+                questions,
+                session.getStatus()
+        );
+    }
+
+    /**
+     * 将实体层的 {@link InterviewSessionEntity.SessionStatus} 转为 DTO 层的 {@link SessionStatus}。
+     * <p>
+     * 两个枚举的值虽然同名，但分属不同类，需要显式转换。
+     */
+    private SessionStatus convertStatus(InterviewSessionEntity.SessionStatus status) {
+        return switch (status) {
+            case CREATED -> SessionStatus.CREATED;
+            case IN_PROGRESS -> SessionStatus.IN_PROGRESS;
+            case COMPLETED -> SessionStatus.COMPLETED;
+            case EVALUATED -> SessionStatus.EVALUATED;
+        };
     }
 
     /**
@@ -276,4 +610,6 @@ public class InterviewService {
     ) {
         // Jackson 反序列化时字段名不匹配时用 @JsonProperty，这里保持和 AI 输出一致
     }
+
+
 }

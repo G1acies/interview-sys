@@ -2,14 +2,17 @@ package interview.guide.modules.interview.controller;
 
 import interview.guide.common.result.Result;
 import interview.guide.modules.interview.model.CreateInterviewRequest;
+import interview.guide.modules.interview.model.CurrentQuestionResponse;
 import interview.guide.modules.interview.model.InterviewSessionDTO;
 import interview.guide.modules.interview.model.SessionListItemDTO;
+import interview.guide.modules.interview.model.SubmitAnswerResponse;
 import interview.guide.modules.interview.service.InterviewService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @RestController
@@ -28,5 +31,40 @@ public class InterviewController {
     public Result<InterviewSessionDTO> createSession(@RequestBody CreateInterviewRequest request) {
         log.info("创建面试会话: skillId={}, questionCount={}", request.skillId(), request.questionCount());
         return Result.success(interviewService.createSession(request));
+    }
+
+    @GetMapping("/sessions/{sessionId}")
+    public Result<InterviewSessionDTO> getSession(@PathVariable String sessionId) {
+        log.info("获取面试会话: sessionId={}", sessionId);
+        return Result.success(interviewService.getSession(sessionId));
+    }
+
+    @GetMapping("/sessions/{sessionId}/question")
+    public Result<CurrentQuestionResponse> getCurrentQuestion(@PathVariable String sessionId) {
+        log.info("获取当前题目: sessionId={}", sessionId);
+        return Result.success(interviewService.getCurrentQuestion(sessionId));
+    }
+
+    @PostMapping("/sessions/{sessionId}/answers")
+    public Result<SubmitAnswerResponse> submitAnswer(
+            @PathVariable String sessionId,
+            @RequestBody Map<String, Object> body) {
+        Integer questionIndex = (Integer) body.get("questionIndex");
+        String answer = (String) body.get("answer");
+        log.info("提交答案: sessionId={}, questionIndex={}, 答案长度={}",
+                sessionId, questionIndex, answer != null ? answer.length() : 0);
+        return Result.success(interviewService.submitAnswer(sessionId, questionIndex, answer));
+    }
+
+    @PutMapping("/sessions/{sessionId}/answers")
+    public Result<Void> saveAnswer(
+            @PathVariable String sessionId,
+            @RequestBody Map<String, Object> body) {
+        Integer questionIndex = (Integer) body.get("questionIndex");
+        String answer = (String) body.get("answer");
+        log.info("暂存答案: sessionId={}, questionIndex={}, 答案长度={}",
+                sessionId, questionIndex, answer != null ? answer.length() : 0);
+        interviewService.saveAnswer(sessionId, questionIndex, answer);
+        return Result.success();
     }
 }
