@@ -28,6 +28,7 @@ import com.itextpdf.layout.element.Paragraph;        // 一段文字，可以链
 import com.itextpdf.layout.properties.TextAlignment; // CENTER / LEFT / RIGHT
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.modules.interview.model.InterviewSessionEntity;
 import interview.guide.modules.resume.model.ResumeEntity;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -298,5 +299,118 @@ public class PdfExportService {
             case "FAILED" -> "失败";
             default -> status;
         };
+    }
+
+    // ==================== 面试报告导出 ====================
+
+    /**
+     * 导出面试评估报告为 PDF。
+     * <p>
+     * 排版结构：
+     * <ol>
+     *   <li>标题"模拟面试报告"</li>
+     *   <li>基本信息（会话ID、方向、难度、状态、时间）</li>
+     *   <li>总分（大字显示）</li>
+     *   <li>总体评价</li>
+     *   <li>优势列表</li>
+     *   <li>改进建议</li>
+     * </ol>
+     *
+     * @param session 面试会话实体
+     * @return 完整 PDF 字节数组
+     */
+    public byte[] exportInterviewReport(InterviewSessionEntity session) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        PdfWriter writer = new PdfWriter(baos);
+        PdfDocument pdfDoc = new PdfDocument(writer);
+        Document document = new Document(pdfDoc);
+
+        try {
+            PdfFont font = loadChineseFont();
+            document.setFont(font);
+
+            // 大标题
+            document.add(new Paragraph("模拟面试报告")
+                    .setFontSize(24).setBold()
+                    .setTextAlignment(TextAlignment.CENTER)
+                    .setFontColor(COLOR_TITLE));
+            document.add(new Paragraph("\n"));
+
+            // 基本信息
+            document.add(sectionTitle("基本信息"));
+            document.add(new Paragraph("会话ID: " + safe(session.getSessionId())));
+            document.add(new Paragraph("面试方向: " + safe(session.getSkillId())));
+            document.add(new Paragraph("难度级别: " + safe(session.getDifficulty())));
+            document.add(new Paragraph("题目数量: " + (
+                    session.getTotalQuestions() != null ? session.getTotalQuestions() : 0)));
+            document.add(new Paragraph("状态: " + (
+                    session.getStatus() != null ? session.getStatus().name() : "未知")));
+            document.add(new Paragraph("创建时间: " + (
+                    session.getCreatedAt() != null
+                            ? DATE_FMT.format(session.getCreatedAt()) : "未知")));
+            if (session.getCompletedAt() != null) {
+                document.add(new Paragraph("完成时间: " + DATE_FMT.format(session.getCompletedAt())));
+            }
+
+            // 总分
+            document.add(new Paragraph("\n"));
+            document.add(sectionTitle("评估得分"));
+            document.add(new Paragraph(String.format("%d / 100",
+                    session.getOverallScore() != null ? session.getOverallScore() : 0))
+                    .setFontSize(36).setBold()
+                    .setTextAlignment(TextAlignment.CENTER)
+                    .setFontColor(new DeviceRgb(39, 174, 96)));
+
+            // 总体评价
+            if (session.getOverallFeedback() != null && !session.getOverallFeedback().isBlank()) {
+                document.add(new Paragraph("\n"));
+                document.add(sectionTitle("总体评价"));
+                document.add(new Paragraph(safe(session.getOverallFeedback())));
+            }
+
+            // 优势
+            if (session.getStrengthsJson() != null && !session.getStrengthsJson().isBlank()) {
+                document.add(new Paragraph("\n"));
+                document.add(sectionTitle("优势"));
+                try {
+                    var strengths = objectMapper.readTree(session.getStrengthsJson());
+                    StringBuilder sb = new StringBuilder();
+                    strengths.forEach(s -> sb.append("• ").append(safe(s.asText())).append("\n"));
+                    String text = sb.toString().trim();
+                    if (!text.isEmpty()) {
+                        document.add(new Paragraph(text));
+                    }
+                } catch (Exception e) {
+                    log.warn("解析 strengthsJson 失败", e);
+                }
+            }
+
+            // 改进建议
+            if (session.getImprovementsJson() != null && !session.getImprovementsJson().isBlank()) {
+                document.add(new Paragraph("\n"));
+                document.add(sectionTitle("改进建议"));
+                try {
+                    var improvements = objectMapper.readTree(session.getImprovementsJson());
+                    StringBuilder sb = new StringBuilder();
+                    improvements.forEach(s -> sb.append("• ").append(safe(s.asText())).append("\n"));
+                    String text = sb.toString().trim();
+                    if (!text.isEmpty()) {
+                        document.add(new Paragraph(text));
+                    }
+                } catch (Exception e) {
+                    log.warn("解析 improvementsJson 失败", e);
+                }
+            }
+
+            document.close();
+        } catch (Exception e) {
+            document.close();
+            log.error("生成面试报告 PDF 失败: sessionId={}, error={}",
+                    session.getSessionId(), e.getMessage(), e);
+            throw new BusinessException(ErrorCode.EXPORT_PDF_FAILED,
+                    "PDF 生成失败: " + e.getMessage());
+        }
+
+        return baos.toByteArray();
     }
 }

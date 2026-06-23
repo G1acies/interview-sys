@@ -2,6 +2,7 @@ package interview.guide.modules.interview.service;
 
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.infrastructure.export.PdfExportService;
 import interview.guide.infrastructure.redis.InterviewSessionCache;
 import interview.guide.infrastructure.redis.InterviewSessionCache.CachedSession;
 import interview.guide.modules.interview.model.*;
@@ -43,6 +44,7 @@ public class InterviewService {
     private final InterviewAnswerRepository answerRepository;
     private final InterviewSessionCache sessionCache;
     private final AnswerEvaluationService answerEvaluationService;
+    private final PdfExportService pdfExportService;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
 
@@ -869,6 +871,59 @@ public class InterviewService {
                 new ArrayList<Object>(referenceAnswers),
                 answerDetails
         );
+    }
+
+    /**
+     * 删除面试会话（级联删除关联的答案）。
+     * <p>
+     * {@link InterviewSessionEntity} 配置了 {@code CascadeType.ALL + orphanRemoval = true}，
+     * 删除会话时 JPA 会自动删除所有关联的答案。
+     *
+     * @param sessionId 会话唯一标识
+     * @throws BusinessException 会话不存在
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteSession(String sessionId) {
+        InterviewSessionEntity entity = sessionRepository.findBySessionId(sessionId)
+                .orElseThrow(() -> new BusinessException(
+                        ErrorCode.INTERVIEW_SESSION_NOT_FOUND, "会话不存在: " + sessionId));
+
+        // 删除 DB 记录（级联删除 answers）
+        sessionRepository.delete(entity);
+        log.info("已删除面试会话: sessionId={}", sessionId);
+
+        // 清理 Redis 缓存
+        try {
+            sessionCache.deleteSession(sessionId);
+        } catch (Exception e) {
+            log.warn("清理 Redis 缓存失败（不影响主流程）: sessionId={}", sessionId);
+        }
+    }
+
+    /**
+     * 导出面试报告为 PDF。
+     *
+     * @param sessionId 会话唯一标识
+     * @return PDF 字节数组
+     * @throws BusinessException 会话不存在或导出失败
+     */
+    public byte[] exportSessionPdf(String sessionId) {
+        InterviewSessionEntity entity = sessionRepository.findBySessionIdWithResume(sessionId)
+                .orElseThrow(() -> new BusinessException(
+                        ErrorCode.INTERVIEW_SESSION_NOT_FOUND, "会话不存在: " + sessionId));
+
+        if (entity.getOverallScore() == null) {
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "面试尚未评估，无法导出报告");
+        }
+
+        try {
+            return pdfExportService.exportInterviewReport(entity);
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("导出 PDF 失败: sessionId={}", sessionId, e);
+            throw new BusinessException(ErrorCode.EXPORT_PDF_FAILED, "导出 PDF 失败");
+        }
     }
 
     /**
