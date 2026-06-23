@@ -1,11 +1,7 @@
 package interview.guide.modules.interview.controller;
 
 import interview.guide.common.result.Result;
-import interview.guide.modules.interview.model.CreateInterviewRequest;
-import interview.guide.modules.interview.model.CurrentQuestionResponse;
-import interview.guide.modules.interview.model.InterviewSessionDTO;
-import interview.guide.modules.interview.model.SessionListItemDTO;
-import interview.guide.modules.interview.model.SubmitAnswerResponse;
+import interview.guide.modules.interview.model.*;
 import interview.guide.modules.interview.service.InterviewService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -66,5 +62,24 @@ public class InterviewController {
                 sessionId, questionIndex, answer != null ? answer.length() : 0);
         interviewService.saveAnswer(sessionId, questionIndex, answer);
         return Result.success();
+    }
+
+    @GetMapping("/sessions/{sessionId}/report")
+    public Result<InterviewReportDTO> generateReport(@PathVariable String sessionId) {
+        log.info("生成面试报告 sessionId = {}", sessionId);
+        return Result.success(interviewService.generateReport(sessionId));
+    }
+
+    @PostMapping("/sessions/{sessionId}/complete")
+    public Result<Void> completeInterview(@PathVariable String sessionId) {
+        log.info("提前交卷: sessionId={}", sessionId);
+        interviewService.completeInterview(sessionId);
+        return Result.success();
+    }
+
+    @GetMapping("/sessions/{sessionId}/details")
+    public Result<InterviewDetailDTO> getSessionDetail(@PathVariable String sessionId) {
+        log.info("获取面试详情， sessionId = {}", sessionId);
+        return Result.success(interviewService.getSessionDetail(sessionId));
     }
 }

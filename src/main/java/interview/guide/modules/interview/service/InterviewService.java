@@ -2,18 +2,10 @@ package interview.guide.modules.interview.service;
 
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
-import interview.guide.common.result.Result;
 import interview.guide.infrastructure.redis.InterviewSessionCache;
 import interview.guide.infrastructure.redis.InterviewSessionCache.CachedSession;
-import interview.guide.modules.interview.model.CreateInterviewRequest;
-import interview.guide.modules.interview.model.CurrentQuestionResponse;
-import interview.guide.modules.interview.model.InterviewAnswerEntity;
-import interview.guide.modules.interview.model.InterviewQuestionDTO;
-import interview.guide.modules.interview.model.InterviewSessionDTO;
+import interview.guide.modules.interview.model.*;
 import interview.guide.modules.interview.model.InterviewSessionDTO.SessionStatus;
-import interview.guide.modules.interview.model.InterviewSessionEntity;
-import interview.guide.modules.interview.model.SessionListItemDTO;
-import interview.guide.modules.interview.model.SubmitAnswerResponse;
 import interview.guide.modules.interview.repository.InterviewAnswerRepository;
 import interview.guide.modules.interview.repository.InterviewSessionRepository;
 import lombok.RequiredArgsConstructor;
@@ -23,8 +15,6 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
@@ -52,6 +42,7 @@ public class InterviewService {
     private final InterviewSessionRepository sessionRepository;
     private final InterviewAnswerRepository answerRepository;
     private final InterviewSessionCache sessionCache;
+    private final AnswerEvaluationService answerEvaluationService;
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
 
@@ -401,6 +392,55 @@ public class InterviewService {
     }
 
     /**
+     * 提前交卷（结束面试）。
+     * <p>
+     * 无论当前答到第几题，将会话状态设为 COMPLETED。
+     * 后续可通过 {@link #generateReport} 触发 AI 评估生成报告。
+     * <p>
+     * 执行步骤：
+     * <ol>
+     *   <li>校验状态必须是 CREATED 或 IN_PROGRESS</li>
+     *   <li>更新状态 → COMPLETED，记录完成时间</li>
+     *   <li>MySQL 持久化</li>
+     *   <li>Redis 缓存同步</li>
+     * </ol>
+     *
+     * @param sessionId 会话唯一标识
+     * @throws BusinessException 会话不存在或已结束
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void completeInterview(String sessionId) {
+        InterviewSessionEntity entity = sessionRepository.findBySessionId(sessionId)
+                .orElseThrow(() -> new BusinessException(
+                        ErrorCode.INTERVIEW_SESSION_NOT_FOUND, "会话不存在: " + sessionId));
+
+        // 1. 校验状态
+        if (entity.getStatus() == InterviewSessionEntity.SessionStatus.COMPLETED
+                || entity.getStatus() == InterviewSessionEntity.SessionStatus.EVALUATED) {
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "面试已结束，无需重复交卷");
+        }
+
+        // 2. 更新状态
+        entity.setStatus(InterviewSessionEntity.SessionStatus.COMPLETED);
+        entity.setCompletedAt(java.time.LocalDateTime.now());
+        // 已答完的不用改 currentQuestionIndex，提前交卷的跳到末尾
+        if (entity.getCurrentQuestionIndex() < entity.getTotalQuestions()) {
+            entity.setCurrentQuestionIndex(entity.getTotalQuestions());
+        }
+
+        // 3. MySQL 持久化
+        sessionRepository.save(entity);
+        log.info("面试已交卷: sessionId={}, status=COMPLETED", sessionId);
+
+        // 4. Redis 缓存同步（非关键路径，失败不影响主流程）
+        try {
+            sessionCache.updateSessionStatus(sessionId, SessionStatus.COMPLETED);
+        } catch (Exception e) {
+            log.warn("更新 Redis 缓存失败（不影响主流程）: sessionId={}", sessionId);
+        }
+    }
+
+    /**
      * 从数据库恢复会话并缓存到 Redis。
      * <p>
      * 流程：
@@ -593,6 +633,242 @@ public class InterviewService {
         // 去掉结尾的 ```
         s = s.replaceAll("\\n?```$", "");
         return s.strip();
+    }
+
+    /**
+     * 生成或获取面试评估报告。
+     * <p>
+     * 根据会话状态走不同分支：
+     * <ul>
+     *   <li><b>CREATED / IN_PROGRESS</b> — 面试尚未完成，抛异常</li>
+     *   <li><b>EVALUATED</b> — 报告已存在，从 DB 反序列化后直接返回</li>
+     *   <li><b>COMPLETED</b> — 触发 AI 评估，保存结果，返回报告</li>
+     * </ul>
+     *
+     * @param sessionId 会话唯一标识
+     * @return 面试评估报告
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public InterviewReportDTO generateReport(String sessionId) {
+        // 使用 JOIN FETCH 加载简历，COMPLETED 分支需要简历文本用于 AI 评估
+        InterviewSessionEntity entity = sessionRepository.findBySessionIdWithResume(sessionId)
+                .orElseThrow(() -> new BusinessException(
+                        ErrorCode.INTERVIEW_SESSION_NOT_FOUND, "会话不存在: " + sessionId));
+
+        // 1. CREATED / IN_PROGRESS → 面试还没答完
+        if (entity.getStatus() == InterviewSessionEntity.SessionStatus.CREATED
+                || entity.getStatus() == InterviewSessionEntity.SessionStatus.IN_PROGRESS) {
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "面试尚未完成，无法生成报告");
+        }
+
+        // 2. EVALUATED → 报告已存在，直接反序列化返回
+        if (entity.getStatus() == InterviewSessionEntity.SessionStatus.EVALUATED) {
+            log.info("报告已存在，从 DB 反序列化: sessionId={}", sessionId);
+            return deserializeReport(entity);
+        }
+
+        // 3. COMPLETED → 触发 AI 评估，保存报告
+        log.info("会话已完成，开始 AI 评估: sessionId={}", sessionId);
+        return evaluateAndSaveReport(entity);
+    }
+
+    /**
+     * 执行 AI 评估并保存报告。
+     * <p>
+     * COMPLETED 分支的核心逻辑：
+     * <ol>
+     *   <li>反序列化题目列表（含已保存的用户答案）</li>
+     *   <li>提取简历文本</li>
+     *   <li>调用 {@link AnswerEvaluationService#evaluateInterview} 执行 AI 评估</li>
+     *   <li>将评估报告持久化到 Entity（JSON 字段）</li>
+     *   <li>更新 Redis 缓存状态为 EVALUATED</li>
+     *   <li>返回报告</li>
+     * </ol>
+     */
+    private InterviewReportDTO evaluateAndSaveReport(InterviewSessionEntity entity) {
+        String sessionId = entity.getSessionId();
+
+        // 1. 反序列化题目列表（含 userAnswer）
+        List<InterviewQuestionDTO> questions = parseJsonList(
+                entity.getQuestionsJson(), new TypeReference<List<InterviewQuestionDTO>>() {});
+
+        // 2. 提取简历文本（通用面试可能没有简历）
+        String resumeText = entity.getResume() != null
+                ? entity.getResume().getRawText()
+                : "";
+
+        // 3. 调用 AI 评估
+        ChatClient chatClient = chatClientBuilder.build();
+        log.info("调用 AI 评估: sessionId={}, 共{}题, 简历长度={}",
+                sessionId, questions.size(), resumeText.length());
+
+        InterviewReportDTO report = answerEvaluationService.evaluateInterview(
+                chatClient, sessionId, resumeText, questions);
+
+        // 4. 持久化报告到 Entity
+        try {
+            entity.setOverallScore(report.overallScore());
+            entity.setOverallFeedback(report.overallFeedback());
+            entity.setStrengthsJson(objectMapper.writeValueAsString(report.strengths()));
+            entity.setImprovementsJson(objectMapper.writeValueAsString(report.improvements()));
+            entity.setReferenceAnswersJson(objectMapper.writeValueAsString(report.referenceAnswers()));
+            entity.setStatus(InterviewSessionEntity.SessionStatus.EVALUATED);
+            sessionRepository.save(entity);
+            log.info("报告已持久化: sessionId={}, score={}", sessionId, report.overallScore());
+        } catch (Exception e) {
+            log.error("序列化报告失败: sessionId={}, error={}", sessionId, e.getMessage(), e);
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "保存评估报告失败");
+        }
+
+        // 5. 更新 Redis 缓存状态
+        try {
+            sessionCache.updateSessionStatus(sessionId, SessionStatus.EVALUATED);
+        } catch (Exception e) {
+            log.warn("更新 Redis 缓存状态失败（不影响主流程）: sessionId={}", sessionId);
+        }
+
+        return report;
+    }
+
+    /**
+     * 从已评估的实体反序列化报告。
+     * <p>
+     * 将 Entity 中 JSON 字段反序列化，结合 answers 表的数据，
+     * 组装完整的 {@link InterviewReportDTO}。
+     */
+    private InterviewReportDTO deserializeReport(InterviewSessionEntity entity) {
+        // 反序列化题目列表（用于获取题面和分类）
+        List<InterviewQuestionDTO> questions = parseJsonList(
+                entity.getQuestionsJson(), new TypeReference<List<InterviewQuestionDTO>>() {});
+
+        // 反序列化优势 / 改进建议 / 参考答案
+        List<String> strengths = parseJsonList(
+                entity.getStrengthsJson(), new TypeReference<List<String>>() {});
+        List<String> improvements = parseJsonList(
+                entity.getImprovementsJson(), new TypeReference<List<String>>() {});
+        List<InterviewReportDTO.ReferenceAnswer> referenceAnswers = parseJsonList(
+                entity.getReferenceAnswersJson(),
+                new TypeReference<List<InterviewReportDTO.ReferenceAnswer>>() {});
+
+        // 从 DB 加载每题答案（含 score + feedback）
+        List<InterviewAnswerEntity> answerEntities =
+                answerRepository.findBySession_SessionIdOrderByQuestionIndex(entity.getSessionId());
+
+        // 构建 questionDetails 和 categoryScores
+        List<InterviewReportDTO.QuestionEvaluation> questionDetails = new ArrayList<>();
+        java.util.Map<String, List<Integer>> categoryScoreMap = new java.util.HashMap<>();
+
+        // 以 questions 为准遍历（确保题号连续，未回答的也显示）
+        if (questions != null) {
+            java.util.Map<Integer, InterviewAnswerEntity> answerMap = answerEntities.stream()
+                    .collect(java.util.stream.Collectors.toMap(
+                            InterviewAnswerEntity::getQuestionIndex,
+                            a -> a,
+                            (a1, a2) -> a1));
+
+            for (InterviewQuestionDTO q : questions) {
+                InterviewAnswerEntity answer = answerMap.get(q.questionIndex());
+                int score = answer != null && answer.getScore() != null ? answer.getScore() : 0;
+                String feedback = answer != null && answer.getFeedback() != null
+                        ? answer.getFeedback() : "";
+                String userAnswer = answer != null ? answer.getUserAnswer() : q.userAnswer();
+
+                questionDetails.add(new InterviewReportDTO.QuestionEvaluation(
+                        q.questionIndex(), q.question(), q.category(),
+                        userAnswer, score, feedback));
+
+                categoryScoreMap.computeIfAbsent(q.category(), k -> new ArrayList<>()).add(score);
+            }
+        }
+
+        // 汇总 categoryScores
+        List<InterviewReportDTO.CategoryScore> categoryScores = categoryScoreMap.entrySet().stream()
+                .map(entry -> new InterviewReportDTO.CategoryScore(
+                        entry.getKey(),
+                        (int) entry.getValue().stream().mapToInt(Integer::intValue).average().orElse(0),
+                        entry.getValue().size()))
+                .toList();
+
+        return new InterviewReportDTO(
+                entity.getSessionId(),
+                entity.getTotalQuestions() != null ? entity.getTotalQuestions() : 0,
+                entity.getOverallScore() != null ? entity.getOverallScore() : 0,
+                categoryScores,
+                questionDetails,
+                entity.getOverallFeedback(),
+                strengths != null ? strengths : List.of(),
+                improvements != null ? improvements : List.of(),
+                referenceAnswers != null ? referenceAnswers : List.of()
+        );
+    }
+
+    /**
+     * 安全地反序列化 JSON 列表。
+     * JSON 为 null 或空串时返回空列表，避免 NPE。
+     */
+    private <T> List<T> parseJsonList(String json, TypeReference<List<T>> typeRef) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, typeRef);
+        } catch (Exception e) {
+            log.warn("反序列化 JSON 失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    public InterviewDetailDTO getSessionDetail(String sessionId) {
+        // 1. 一次解包，避免重复 orElseThrow
+        InterviewSessionEntity e = sessionRepository.findBySessionId(sessionId)
+                .orElseThrow(() -> new BusinessException(
+                        ErrorCode.INTERVIEW_SESSION_NOT_FOUND, "会话不存在: " + sessionId));
+
+        // 2. 反序列化 JSON 字段
+        List<InterviewQuestionDTO> questions = parseJsonList(
+                e.getQuestionsJson(), new TypeReference<List<InterviewQuestionDTO>>() {});
+        List<String> strengths = parseJsonList(
+                e.getStrengthsJson(), new TypeReference<List<String>>() {});
+        List<String> improvements = parseJsonList(
+                e.getImprovementsJson(), new TypeReference<List<String>>() {});
+        List<InterviewReportDTO.ReferenceAnswer> referenceAnswers = parseJsonList(
+                e.getReferenceAnswersJson(),
+                new TypeReference<List<InterviewReportDTO.ReferenceAnswer>>() {});
+
+        // 3. 将 InterviewAnswerEntity 列表转为 AnswerDetailDTO 列表
+        List<InterviewDetailDTO.AnswerDetailDTO> answerDetails = e.getAnswers().stream()
+                .map(a -> new InterviewDetailDTO.AnswerDetailDTO(
+                        a.getQuestionIndex(),
+                        a.getQuestion(),
+                        a.getCategory(),
+                        a.getUserAnswer(),
+                        a.getScore(),
+                        a.getFeedback(),
+                        a.getReferenceAnswer(),
+                        parseJsonList(a.getKeyPointsJson(),
+                                new TypeReference<List<String>>() {}),
+                        a.getAnsweredAt()
+                ))
+                .toList();
+
+        // 4. 组装 DTO（枚举转 String，泛型转 Object 匹配 DTO 定义）
+        return new InterviewDetailDTO(
+                e.getId(),
+                e.getSessionId(),
+                e.getTotalQuestions(),
+                e.getStatus().name(),
+                e.getEvaluateStatus() != null ? e.getEvaluateStatus().name() : null,
+                e.getEvaluateError(),
+                e.getOverallScore(),
+                e.getOverallFeedback(),
+                e.getCreatedAt(),
+                e.getCompletedAt(),
+                new ArrayList<Object>(questions),
+                strengths,
+                improvements,
+                new ArrayList<Object>(referenceAnswers),
+                answerDetails
+        );
     }
 
     /**
