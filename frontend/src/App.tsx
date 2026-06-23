@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useOu
 import Layout from './components/Layout';
 import { useEffect, useState, Suspense, lazy } from 'react';
 import { historyApi, type InterviewDetail } from './api/history';
+import { interviewApi } from './api/interview';
 import type { UploadKnowledgeBaseResponse } from './api/knowledgebase';
 import type { Difficulty } from './components/UnifiedInterviewModal';
 import type { CategoryDTO } from './api/skill';
@@ -135,9 +136,9 @@ function InterviewWrapper() {
     navigate('/history', { replace: false });
   };
 
-  const handleInterviewComplete = () => {
-    // 面试完成后跳转到面试记录页
-    navigate('/interviews');
+  const handleInterviewComplete = (sessionId: string) => {
+    // 面试完成后跳转到报告页
+    navigate(`/interviews/${sessionId}`);
   };
 
   if (loading) {
@@ -261,14 +262,26 @@ function InterviewDetailPageWrapper() {
       navigate('/interviews');
       return;
     }
-    historyApi.getInterviewDetail(sessionId)
-      .then(detail => {
-        setInterview(detail);
-        setLoading(false);
+
+    // 先调 getReport 触发 AI 评估（如果尚未评估），再加载详情
+    interviewApi.getReport(sessionId)
+      .catch(err => {
+        // getReport 可能因"面试尚未完成"等业务原因失败，
+        // 但不影响详情页展示已有数据
+        console.warn('获取评估报告失败（详情页将继续展示已有数据）:', err);
       })
-      .catch(() => {
-        setError('加载面试详情失败');
-        setLoading(false);
+      .finally(() => {
+        // 无论评估成功与否，都加载详情
+        historyApi.getInterviewDetail(sessionId)
+          .then(detail => {
+            // 用 getReport 返回的 score 覆盖 detail 中的值（如果有）
+            setInterview(detail);
+            setLoading(false);
+          })
+          .catch(() => {
+            setError('加载面试详情失败');
+            setLoading(false);
+          });
       });
   }, [sessionId, navigate]);
 

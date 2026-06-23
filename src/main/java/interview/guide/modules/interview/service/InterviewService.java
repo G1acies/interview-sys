@@ -298,6 +298,15 @@ public class InterviewService {
 
             answerRepository.save(answerEntity);
             log.debug("答案已持久化: sessionId={}, questionIndex={}", sessionId, questionIndex);
+
+            // 将带答案的题目列表写回 Entity.questionsJson
+            // 这样 evaluateAndSaveReport() 反序列化时才能拿到 userAnswer
+            try {
+                entity.setQuestionsJson(objectMapper.writeValueAsString(questions));
+                sessionRepository.save(entity);
+            } catch (Exception e) {
+                log.warn("更新 questionsJson 失败（不影响主流程）: {}", e.getMessage());
+            }
         });
 
         // 5. 推进到下一题
@@ -386,6 +395,14 @@ public class InterviewService {
 
             answerRepository.save(answerEntity);
             log.debug("暂存答案已持久化: sessionId={}, questionIndex={}", sessionId, questionIndex);
+
+            // 同步更新 Entity.questionsJson，确保答案不丢失
+            try {
+                entity.setQuestionsJson(objectMapper.writeValueAsString(questions));
+                sessionRepository.save(entity);
+            } catch (Exception e) {
+                log.warn("更新 questionsJson 失败（不影响主流程）: {}", e.getMessage());
+            }
         });
 
         // 5. 更新 Redis 缓存（只更新问题列表，不推进索引）
@@ -548,73 +565,105 @@ public class InterviewService {
      * @param difficulty    难度级别
      * @return 题目列表（已编号）
      */
+    /**
+     * 重试时追加的严格 JSON 指令 — 强调字符转义和格式正确性。
+     */
+    private static final String RETRY_STRICT_JSON = """
+        
+        【重要】上次输出 JSON 格式有误，请严格遵守：
+        1) 字符串内部的所有双引号必须转义为 \\"，不能使用未转义的 " 字符
+        2) 不要输出 Markdown 代码块（```json）
+        3) 不要包含任何额外说明文字，只输出 JSON 数组
+        4) 确保 JSON 语法完全正确，可以用 JSON 验证器检查
+        """;
+
     private List<InterviewQuestionDTO> generateQuestionsByAI(
             String resumeText, int questionCount, String skillId, String difficulty) {
 
         ChatClient chatClient = chatClientBuilder.build();
+        String baseSystemPrompt = SYSTEM_PROMPT
+                .replace("{questionCount}", String.valueOf(questionCount))
+                .replace("{difficulty}", difficulty != null ? difficulty : "mid");
+        int maxAttempts = 2;
+        String lastError = null;
 
-        // 组装 Prompt：把 systemPrompt 和参数一起塞给 LLM
-        Prompt prompt = new PromptTemplate("""
-                {systemPrompt}
-                
-                简历内容：
-                {resumeText}
-                """).create(Map.of(
-                "systemPrompt", SYSTEM_PROMPT
-                        .replace("{questionCount}", String.valueOf(questionCount))
-                        .replace("{difficulty}", difficulty != null ? difficulty : "mid"),
-                "resumeText", resumeText
-        ));
-
-        String response = chatClient.prompt(prompt)
-                .call()
-                .content();
-
-        log.debug("AI 原始响应: {}", response);
-
-        if (response == null || response.isBlank()) {
-            log.error("AI 返回空响应");
-            throw new BusinessException(ErrorCode.AI_SERVICE_ERROR, "AI 未返回任何内容");
-        }
-
-        // 提取纯 JSON
-        String json = extractJson(response);
-
-        try {
-            // 解析 AI 返回的题目列表
-            List<RawQuestion> rawQuestions = objectMapper.readValue(
-                    json, new TypeReference<List<RawQuestion>>() {
-                    });
-
-            if (rawQuestions == null || rawQuestions.isEmpty()) {
-                log.warn("AI 返回空题目列表");
-                return List.of();
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // 第 2 次重试时追加严格 JSON 指令
+            String systemPrompt = baseSystemPrompt;
+            if (attempt > 1) {
+                systemPrompt = baseSystemPrompt + RETRY_STRICT_JSON;
             }
 
-            // 重新编号并转换为 InterviewQuestionDTO
-            List<InterviewQuestionDTO> result = new ArrayList<>();
-            for (int i = 0; i < rawQuestions.size(); i++) {
-                RawQuestion rq = rawQuestions.get(i);
-                String type = rq.type != null ? rq.type.toUpperCase() : skillId.toUpperCase();
-                result.add(InterviewQuestionDTO.create(
-                        i,
-                        rq.question != null ? rq.question : "",
-                        type,
-                        rq.category != null ? rq.category : type,
-                        rq.topicSummary,
-                        false,   // isFollowUp — 主问题不是追问
-                        null     // parentQuestionIndex — 主问题无父节点
-                ));
+            // 组装 Prompt
+            Prompt prompt = new PromptTemplate("""
+                    {systemPrompt}
+                    
+                    简历内容：
+                    {resumeText}
+                    """).create(Map.of(
+                    "systemPrompt", systemPrompt,
+                    "resumeText", resumeText
+            ));
+
+            String response = chatClient.prompt(prompt)
+                    .call()
+                    .content();
+
+            log.debug("AI 原始响应 (第{}次): {}", attempt, response);
+
+            if (response == null || response.isBlank()) {
+                lastError = "AI 返回空响应";
+                if (attempt < maxAttempts) {
+                    log.warn("{}，将重试", lastError);
+                    continue;
+                }
+                throw new BusinessException(ErrorCode.AI_SERVICE_ERROR, "AI 未返回任何内容");
             }
 
-            log.info("AI 生成题目完成: 请求={} 道, 实际={} 道", questionCount, result.size());
-            return result;
+            // 提取纯 JSON
+            String json = extractJson(response);
 
-        } catch (Exception e) {
-            log.error("解析 AI 响应 JSON 失败: json={}, error={}", json, e.getMessage(), e);
-            throw new BusinessException(ErrorCode.AI_STRUCTURED_OUTPUT_FAILED,
-                    "AI 返回格式异常，无法解析题目: " + e.getMessage());
+            try {
+                // 解析 AI 返回的题目列表
+                List<RawQuestion> rawQuestions = objectMapper.readValue(
+                        json, new TypeReference<List<RawQuestion>>() {});
+
+                if (rawQuestions == null || rawQuestions.isEmpty()) {
+                    log.warn("AI 返回空题目列表");
+                    return List.of();
+                }
+
+                // 重新编号并转换为 InterviewQuestionDTO
+                List<InterviewQuestionDTO> result = new ArrayList<>();
+                for (int i = 0; i < rawQuestions.size(); i++) {
+                    RawQuestion rq = rawQuestions.get(i);
+                    String type = rq.type != null ? rq.type.toUpperCase() : skillId.toUpperCase();
+                    result.add(InterviewQuestionDTO.create(
+                            i,
+                            rq.question != null ? rq.question : "",
+                            type,
+                            rq.category != null ? rq.category : type,
+                            rq.topicSummary,
+                            false,
+                            null
+                    ));
+                }
+
+                log.info("AI 生成题目完成: 请求={} 道, 实际={} 道", questionCount, result.size());
+                return result;
+
+            } catch (Exception e) {
+                lastError = e.getMessage() != null ? e.getMessage() : "未知错误";
+                log.warn("解析 AI 响应 JSON 失败 (第{}次): {}", attempt, lastError);
+                if (attempt >= maxAttempts) {
+                    log.error("重试耗尽，json={}", json);
+                }
+                // attempt < maxAttempts 时继续循环，不 throw
+            }
         }
+
+        throw new BusinessException(ErrorCode.AI_STRUCTURED_OUTPUT_FAILED,
+                "AI 返回格式异常，重试" + maxAttempts + "次后仍无法解析: " + lastError);
     }
 
     /**
@@ -941,6 +990,5 @@ public class InterviewService {
     ) {
         // Jackson 反序列化时字段名不匹配时用 @JsonProperty，这里保持和 AI 输出一致
     }
-
 
 }

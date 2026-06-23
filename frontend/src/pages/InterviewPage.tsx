@@ -29,7 +29,7 @@ interface InterviewProps {
     jdText?: string;
   };
   onBack: () => void;
-  onInterviewComplete: () => void;
+  onInterviewComplete: (sessionId: string) => void;
 }
 
 export default function Interview({
@@ -175,7 +175,7 @@ export default function Interview({
           questionIndex: response.nextQuestion!.questionIndex
         }]);
       } else {
-        onInterviewComplete();
+        onInterviewComplete(session.sessionId);
       }
     } catch (err) {
       setError('提交答案失败，请重试');
@@ -192,7 +192,7 @@ export default function Interview({
     try {
       await interviewApi.completeInterview(session.sessionId);
       setShowCompleteConfirm(false);
-      onInterviewComplete();
+      onInterviewComplete(session.sessionId);
     } catch (err) {
       setError('提前交卷失败，请重试');
       console.error(err);

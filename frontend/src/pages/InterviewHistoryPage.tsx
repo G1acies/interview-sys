@@ -561,18 +561,27 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
                           </button>
                         )}
                         {isEvaluateCompleted(item) && item.type === 'text' && (
-                          <button
-                            onClick={(e) => handleExport(item.sessionId, e)}
-                            disabled={exporting === item.sessionId}
-                            className="p-2 text-slate-400 hover:text-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/30 rounded-lg transition-colors disabled:opacity-50"
-                            title="导出PDF"
-                          >
-                            {exporting === item.sessionId ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                              <Download className="w-4 h-4" />
-                            )}
-                          </button>
+                          <>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigate(`/interviews/${item.sessionId}`); }}
+                              className="p-2 text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg transition-colors"
+                              title="查看报告"
+                            >
+                              <FileText className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={(e) => handleExport(item.sessionId, e)}
+                              disabled={exporting === item.sessionId}
+                              className="p-2 text-slate-400 hover:text-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/30 rounded-lg transition-colors disabled:opacity-50"
+                              title="导出PDF"
+                            >
+                              {exporting === item.sessionId ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Download className="w-4 h-4" />
+                              )}
+                            </button>
+                          </>
                         )}
                         {isEvaluateCompleted(item) && item.type === 'text' && item.resumeId && onRestartInterview && (
                           <button
