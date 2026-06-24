@@ -148,10 +148,36 @@ public class RedisService {
         }
     }
 
-    /** 发送消息到 Stream，返回消息 ID */
+    /**
+     * 发送消息到 Stream（无长度限制），返回消息 ID。
+     *
+     * @param streamKey Stream 的 Key
+     * @param message   消息内容（Key-Value Map）
+     * @return 消息 ID（可用于后续 ACK 或查询）
+     */
     public String streamAdd(String streamKey, Map<String, String> message) {
         RStream<String, String> stream = redissonClient.getStream(streamKey, StringCodec.INSTANCE);
         var args = org.redisson.api.stream.StreamAddArgs.entries(message);
+        return stream.add(args).toString();
+    }
+
+    /**
+     * 发送消息到 Stream（带最大长度限制），返回消息 ID。
+     * <p>
+     * 当 Stream 长度超过 {@code maxLen} 时，Redis 会自动裁剪最旧的消息。
+     * 防止 Stream 无限增长占用过多内存。
+     *
+     * @param streamKey Stream 的 Key
+     * @param message   消息内容（Key-Value Map）
+     * @param maxLen    最大消息条数，超出时自动裁剪旧消息
+     * @return 消息 ID
+     */
+    public String streamAdd(String streamKey, Map<String, String> message, int maxLen) {
+        RStream<String, String> stream = redissonClient.getStream(streamKey, StringCodec.INSTANCE);
+        var args = org.redisson.api.stream.StreamAddArgs.entries(message);
+        if (maxLen > 0) {
+            args.trimNonStrict().maxLen(maxLen);
+        }
         return stream.add(args).toString();
     }
 

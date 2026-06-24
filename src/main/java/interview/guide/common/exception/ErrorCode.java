@@ -29,6 +29,8 @@ public enum ErrorCode {
     // 知识库模块 6xxx
     KNOWLEDGE_BASE_NOT_FOUND(6001, "知识库不存在"),
     KNOWLEDGE_BASE_VECTORIZE_FAILED(6002, "知识库向量化失败"),
+    KNOWLEDGE_BASE_DELETE_FAILED(6003, "知识库删除失败"),
+    KNOWLEDGE_BASE_QUERY_FAILED(6004, "知识库查询失败"),
 
     // AI 服务 7xxx
     AI_SERVICE_TIMEOUT(7001, "AI 服务超时"),
