@@ -17,7 +17,7 @@ import java.util.Map;
  * {@code knowledgebase:vectorize:stream} 队列。
  * <p>
  * <b>触发时机：</b>
- * 用户在知识库上传页面提交文件后，由 {@link interview.guide.modules.knowledgebase.service.KnowledgeBaseUploadService}
+ * 用户在知识库上传页面提交文件后，由 {@link interview.guide.modules.knowledgebase.service.KnowledgeBaseManageService}
  * 调用 {@link #sendVectorizeTask(Long, String)}。
  * <p>
  * <b>消息格式：</b>
@@ -86,7 +86,7 @@ public class VectorizeStreamProducer extends AbstractStreamProducer<VectorizeStr
     }
 
     @Override
-    protected String payloadIdentifier(VectorizePayload payload) {
+    protected String payloadIdentifier(VectorizeTaskPayload payload) {
         return "kbId=" + payload.kbId();
     }
 

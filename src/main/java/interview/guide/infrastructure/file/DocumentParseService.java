@@ -31,7 +31,7 @@ import java.io.InputStream;
 @RequiredArgsConstructor
 public class DocumentParseService {
 
-    private static final int MAX_TEXT_LENGTH = 5 * 1024 * 1024; // 5MB 上限
+    private static final int MAX_TEXT_LENGTH = 20 * 1024 * 1024; // 5MB 上限
 
     private final TextCleaningService textCleaningService;
 

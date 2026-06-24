@@ -1,0 +1,83 @@
+services:
+
+  # =========================================
+  # PostgreSQL + pgvector
+  # 存储业务数据 + 向量数据（RAG 知识库检索）
+  # =========================================
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: learn-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_DB: interview_learn
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # =========================================
+  # Redis — 缓存 + 消息队列（Redis Stream）
+  # =========================================
+  redis:
+    image: redis:7
+    container_name: learn-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # =========================================
+  # MinIO — S3 兼容对象存储
+  # 存储上传的简历、知识库文档等文件
+  # =========================================
+  minio:
+    image: minio/minio
+    container_name: learn-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # =========================================
+  # 初始化 MinIO 桶
+  # 自动创建项目所需的存储桶并设为公开可读
+  # =========================================
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb myminio/interview-guide;
+      /usr/bin/mc anonymous set public myminio/interview-guide;
+      exit 0;
+      "
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

@@ -1,24 +1,23 @@
 package interview.guide.modules.knowledgebase.controller;
 
+import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.result.Result;
-import interview.guide.modules.knowledgebase.model.KnowledgeBaseListItemDTO;
-import interview.guide.modules.knowledgebase.model.KnowledgeBaseStatsDTO;
-import interview.guide.modules.knowledgebase.model.QueryRequest;
-import interview.guide.modules.knowledgebase.model.QueryResponse;
-import interview.guide.modules.knowledgebase.service.KnowledgeBaseDeleteService;
-import interview.guide.modules.knowledgebase.service.KnowledgeBaseListService;
+import interview.guide.modules.knowledgebase.model.*;
+import interview.guide.modules.knowledgebase.service.KnowledgeBaseManageService;
 import interview.guide.modules.knowledgebase.service.KnowledgeBaseQueryService;
-import interview.guide.modules.knowledgebase.service.KnowledgeBaseUploadService;
 import jakarta.validation.Valid;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import reactor.core.publisher.Flux;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -40,10 +39,9 @@ import java.util.Map;
 @Tag(name = "知识库管理", description = "知识库上传、下载、查询、分类与向量化")
 public class KnowledgeBaseController {
 
-    private final KnowledgeBaseUploadService uploadService;
+    private final KnowledgeBaseManageService manageService;
     private final KnowledgeBaseQueryService queryService;
-    private final KnowledgeBaseListService listService;
-    private final KnowledgeBaseDeleteService deleteService;
+    private final KnowledgeBaseQueryService knowledgeBaseQueryService;
 
     // ========== 列表与详情 ==========
 
@@ -57,19 +55,30 @@ public class KnowledgeBaseController {
     public Result<List<KnowledgeBaseListItemDTO>> getAllKnowledgeBases(
             @RequestParam(value = "sortBy", required = false) String sortBy,
             @RequestParam(value = "vectorStatus", required = false) String vectorStatus) {
-        return Result.success(List.of()); // TODO
+        VectorStatus status = null;
+        if (vectorStatus != null && !vectorStatus.isBlank()) {
+            try {
+                status = VectorStatus.valueOf(vectorStatus.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                return Result.error("无效的向量化状态: " + vectorStatus);
+            }
+        }
+        return Result.success(manageService.listKnowledgeBases(status, sortBy));
     }
 
     /** 获取知识库详情。 */
     @GetMapping("/api/knowledgebase/{id}")
     public Result<KnowledgeBaseListItemDTO> getKnowledgeBase(@PathVariable Long id) {
-        return Result.success(null); // TODO
+        return manageService.getKnowledgeBase(id)
+                .map(Result::success)
+                .orElse(Result.error(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND.getCode(), "知识库不存在"));
     }
 
     /** 删除知识库。 */
     @DeleteMapping("/api/knowledgebase/{id}")
     public Result<Void> deleteKnowledgeBase(@PathVariable Long id) {
-        return Result.success(null); // TODO
+        manageService.deleteKnowledgeBase(id);
+        return Result.success(null);
     }
 
     // ========== RAG 查询 ==========
@@ -80,7 +89,8 @@ public class KnowledgeBaseController {
      */
     @PostMapping("/api/knowledgebase/query")
     public Result<QueryResponse> queryKnowledgeBase(@Valid @RequestBody QueryRequest request) {
-        return Result.success(null); // TODO
+        log.info("RAG 查询（非流式） knowledgeBaseIds = {}, question = {}",request.knowledgeBaseIds(), request.question());
+        return Result.success (knowledgeBaseQueryService.queryKnowledgeBase(request));
     }
 
     /**
@@ -92,79 +102,108 @@ public class KnowledgeBaseController {
         return Flux.empty(); // TODO
     }
 
+    // ========== 下载 ==========
+
+    /**
+     * 下载知识库文件。
+     * <p>
+     * 不走 Result 包装，直接返回文件二进制流。
+     * Content-Disposition 设为 attachment 触发浏览器下载，
+     * 文件名经过 URL 编码兼容中文。
+     */
+    @GetMapping("/api/knowledgebase/{id}/download")
+    public ResponseEntity<byte[]> downloadKnowledgeBase(@PathVariable Long id) {
+        var entity = manageService.getEntityForDownload(id);
+        byte[] fileContent = manageService.downloadFile(id);
+
+        String filename = entity.getOriginalFilename();
+        String encodedFilename = URLEncoder.encode(filename, StandardCharsets.UTF_8)
+                .replaceAll("\\+", "%20");
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"" + encodedFilename
+                        + "\"; filename*=UTF-8''" + encodedFilename)
+                .header(HttpHeaders.CONTENT_TYPE,
+                        entity.getContentType() != null ? entity.getContentType()
+                                : MediaType.APPLICATION_OCTET_STREAM_VALUE)
+                .body(fileContent);
+    }
+
     // ========== 分类管理 ==========
 
-    /** 获取所有分类。 */
+    /** 获取所有已分配的分类名称。 */
     @GetMapping("/api/knowledgebase/categories")
     public Result<List<String>> getAllCategories() {
-        return Result.success(List.of()); // TODO
+        return Result.success(manageService.getAllCategories());
     }
 
     /** 根据分类获取知识库列表。 */
     @GetMapping("/api/knowledgebase/category/{category}")
     public Result<List<KnowledgeBaseListItemDTO>> getByCategory(@PathVariable String category) {
-        return Result.success(List.of()); // TODO
+        return Result.success(manageService.listByCategory(category));
     }
 
-    /** 获取未分类的知识库。 */
+    /** 获取未分类的知识库（category 为 null 的记录）。 */
     @GetMapping("/api/knowledgebase/uncategorized")
     public Result<List<KnowledgeBaseListItemDTO>> getUncategorized() {
-        return Result.success(List.of()); // TODO
+        return Result.success(manageService.listByCategory(null));
     }
 
-    /** 更新知识库分类。 */
+    /** 更新知识库分类。category 传 null 或空字符串表示设为未分类。 */
     @PutMapping("/api/knowledgebase/{id}/category")
     public Result<Void> updateCategory(@PathVariable Long id, @RequestBody Map<String, String> body) {
-        return Result.success(null); // TODO
+        manageService.updateCategory(id, body.get("category"));
+        return Result.success(null);
     }
 
-    // ========== 上传下载 ==========
+    // ========== 上传 ==========
 
     /**
      * 上传知识库文件。
      * 受限流保护：全局每分钟 3 次，每 IP 每分钟 3 次。
      */
     @PostMapping(value = "/api/knowledgebase/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Result<Map<String, Object>> uploadKnowledgeBase(
+    public Result<UploadKnowledgeBaseResponse> uploadKnowledgeBase(
             @RequestParam("file") MultipartFile file,
             @RequestParam(value = "name", required = false) String name,
             @RequestParam(value = "category", required = false) String category) {
-        return Result.success(Map.of()); // TODO
-    }
-
-    /**
-     * 下载知识库文件。
-     * 返回原始文件字节流，自动设置 Content-Disposition 和 Content-Type 头部。
-     */
-    @GetMapping("/api/knowledgebase/{id}/download")
-    public ResponseEntity<byte[]> downloadKnowledgeBase(@PathVariable Long id) {
-        return null; // TODO
+        UploadKnowledgeBaseResponse response = manageService.uploadKnowledgeBase(file, name, category);
+        return Result.success(response);
     }
 
     // ========== 搜索 ==========
 
-    /** 按关键词搜索知识库。 */
+    /** 按关键词搜索知识库（匹配名称或原始文件名，不区分大小写）。 */
     @GetMapping("/api/knowledgebase/search")
     public Result<List<KnowledgeBaseListItemDTO>> search(@RequestParam("keyword") String keyword) {
-        return Result.success(List.of()); // TODO
+        return Result.success(manageService.search(keyword));
     }
 
     // ========== 统计 ==========
 
-    /** 获取知识库统计信息。 */
+    /**
+     * 获取知识库统计信息。
+     * <p>
+     * 返回总数、总提问次数、总访问次数、向量化完成数和处理中数，
+     * 用于前端知识库管理页面的统计概览卡片。
+     */
     @GetMapping("/api/knowledgebase/stats")
     public Result<KnowledgeBaseStatsDTO> getStatistics() {
-        return Result.success(null); // TODO
+        return Result.success(manageService.getStatistics());
     }
 
     // ========== 向量化管理 ==========
 
     /**
      * 重新向量化知识库（手动重试）。
-     * 用于向量化失败后的手动触发。受限流保护。
+     * <p>
+     * 用户在前端看到向量化状态为 FAILED 后，点击"重新向量化"按钮触发此接口。
+     * 后端重新从 MinIO 下载文件 → 解析文本 → 发送向量化任务到 Redis Stream。
      */
     @PostMapping("/api/knowledgebase/{id}/revectorize")
     public Result<Void> revectorize(@PathVariable Long id) {
-        return Result.success(null); // TODO
+        manageService.revectorize(id);
+        return Result.success(null);
     }
 }

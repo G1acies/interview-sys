@@ -1,5 +1,6 @@
 package interview.guide.infrastructure.file;
 
+import interview.guide.common.config.S3Config;
 import interview.guide.common.config.StorageConfigProperties;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
@@ -105,6 +106,25 @@ public class FileStorageService {
             log.error("下载文件失败: {} - {}", fileKey, e.getMessage(), e);
             throw new BusinessException(ErrorCode.STORAGE_DOWNLOAD_FAILED, "文件下载失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 上传知识库文档到 knowledgebases 目录。
+     *
+     * @param file 上传的文件
+     * @return 文件存储键，如 "knowledgebases/2026/06/24/a1b2c3d4_xxx.pdf"
+     */
+    public String uploadKnowledgeBase(MultipartFile file) {
+        return uploadFile(file, "knowledgebases");
+    }
+
+    /**
+     * 删除知识库文档。
+     *
+     * @param fileKey 文件存储键
+     */
+    public void deleteKnowledgeBase(String fileKey) {
+        deleteFile(fileKey);
     }
 
     /**

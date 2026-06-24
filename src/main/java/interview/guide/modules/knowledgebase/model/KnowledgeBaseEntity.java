@@ -1,6 +1,9 @@
 package interview.guide.modules.knowledgebase.model;
 
 import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.time.LocalDateTime;
 
@@ -24,6 +27,9 @@ import java.time.LocalDateTime;
  *   <li>{@code category} — 普通索引，加速按分类查询</li>
  * </ul>
  */
+@Getter
+@Setter
+@NoArgsConstructor
 @Entity
 @Table(name = "knowledge_bases", indexes = {
     @Index(name = "idx_kb_hash", columnList = "fileHash", unique = true),
@@ -113,53 +119,4 @@ public class KnowledgeBaseEntity {
         this.lastAccessedAt = LocalDateTime.now();
     }
 
-    // ========== Getters & Setters ==========
-
-    public Long getId() { return id; }
-    public void setId(Long id) { this.id = id; }
-
-    public String getFileHash() { return fileHash; }
-    public void setFileHash(String fileHash) { this.fileHash = fileHash; }
-
-    public String getName() { return name; }
-    public void setName(String name) { this.name = name; }
-
-    public String getCategory() { return category; }
-    public void setCategory(String category) { this.category = category; }
-
-    public String getOriginalFilename() { return originalFilename; }
-    public void setOriginalFilename(String originalFilename) { this.originalFilename = originalFilename; }
-
-    public Long getFileSize() { return fileSize; }
-    public void setFileSize(Long fileSize) { this.fileSize = fileSize; }
-
-    public String getContentType() { return contentType; }
-    public void setContentType(String contentType) { this.contentType = contentType; }
-
-    public String getStorageKey() { return storageKey; }
-    public void setStorageKey(String storageKey) { this.storageKey = storageKey; }
-
-    public String getStorageUrl() { return storageUrl; }
-    public void setStorageUrl(String storageUrl) { this.storageUrl = storageUrl; }
-
-    public LocalDateTime getUploadedAt() { return uploadedAt; }
-    public void setUploadedAt(LocalDateTime uploadedAt) { this.uploadedAt = uploadedAt; }
-
-    public LocalDateTime getLastAccessedAt() { return lastAccessedAt; }
-    public void setLastAccessedAt(LocalDateTime lastAccessedAt) { this.lastAccessedAt = lastAccessedAt; }
-
-    public Integer getAccessCount() { return accessCount; }
-    public void setAccessCount(Integer accessCount) { this.accessCount = accessCount; }
-
-    public Integer getQuestionCount() { return questionCount; }
-    public void setQuestionCount(Integer questionCount) { this.questionCount = questionCount; }
-
-    public VectorStatus getVectorStatus() { return vectorStatus; }
-    public void setVectorStatus(VectorStatus vectorStatus) { this.vectorStatus = vectorStatus; }
-
-    public String getVectorError() { return vectorError; }
-    public void setVectorError(String vectorError) { this.vectorError = vectorError; }
-
-    public Integer getChunkCount() { return chunkCount; }
-    public void setChunkCount(Integer chunkCount) { this.chunkCount = chunkCount; }
 }
