@@ -1,6 +1,16 @@
 server:
   port: 8080
 
+# SpringDoc OpenAPI / Swagger 配置
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  packages-to-scan: interview.guide.modules
+
 spring:
   application:
     name: interview-learn
@@ -51,6 +61,15 @@ spring:
         options:
           model: ${AI_MODEL:qwen3.7-max}
 
+    # pgvector 向量数据库配置（用于 RAG 知识库）
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1024  # text-embedding-v3 维度
+        initialize-schema: true
+        remove-existing-vector-store-table: false
+
 # CORS 跨域
 app:
   cors:
@@ -70,6 +89,19 @@ app:
     secret-key: ${APP_STORAGE_SECRET_KEY:minioadmin}
     bucket: ${APP_STORAGE_BUCKET:interview-guide}
     region: ${APP_STORAGE_REGION:us-east-1}
+
+  # 知识库 RAG 配置
+  ai:
+    rag:
+      rewrite:
+        enabled: ${APP_AI_RAG_REWRITE_ENABLED:true}
+      search:
+        short-query-length: ${APP_AI_RAG_SHORT_QUERY_LENGTH:4}
+        topk-short: ${APP_AI_RAG_TOPK_SHORT:20}
+        topk-medium: ${APP_AI_RAG_TOPK_MEDIUM:12}
+        topk-long: ${APP_AI_RAG_TOPK_LONG:8}
+        min-score-short: ${APP_AI_RAG_MIN_SCORE_SHORT:0.18}
+        min-score-default: ${APP_AI_RAG_MIN_SCORE_DEFAULT:0.28}
 
 logging:
   level:

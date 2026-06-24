@@ -33,7 +33,7 @@ dependencies {
     // Spring AI 2.0
     implementation platform('org.springaicommunity:spring-ai-agent-utils-bom:0.7.0')
     implementation 'org.springframework.ai:spring-ai-starter-model-openai:2.0.0-M4'
-    // implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector:2.0.0-M4'
+    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector:2.0.0-M4'
 
     // Apache Tika — 文档解析（PDF/DOCX/TXT → 纯文本）
     implementation 'org.apache.tika:tika-core:2.9.2'
@@ -42,10 +42,16 @@ dependencies {
     // AWS S3 SDK
     implementation 'software.amazon.awssdk:s3:2.29.51'
 
+    // Pinyin4j — 汉字转拼音（文件名校验）
+    implementation 'com.belerweb:pinyin4j:2.5.1'
+
+    // SpringDoc OpenAPI — Swagger 接口文档
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.5'
+
     // Redisson — Redis 缓存和限流
     implementation 'org.redisson:redisson-spring-boot-starter:4.0.0'
 
-    // iText 8 — TODO: PDF 导出阶段引入
+    // iText 8 —
     implementation 'com.itextpdf:itext-core:8.0.5'
     implementation 'com.itextpdf:font-asian:8.0.5'
 
