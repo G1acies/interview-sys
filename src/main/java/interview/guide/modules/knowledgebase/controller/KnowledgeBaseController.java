@@ -41,7 +41,6 @@ public class KnowledgeBaseController {
 
     private final KnowledgeBaseManageService manageService;
     private final KnowledgeBaseQueryService queryService;
-    private final KnowledgeBaseQueryService knowledgeBaseQueryService;
 
     // ========== 列表与详情 ==========
 
@@ -90,16 +89,33 @@ public class KnowledgeBaseController {
     @PostMapping("/api/knowledgebase/query")
     public Result<QueryResponse> queryKnowledgeBase(@Valid @RequestBody QueryRequest request) {
         log.info("RAG 查询（非流式） knowledgeBaseIds = {}, question = {}",request.knowledgeBaseIds(), request.question());
-        return Result.success (knowledgeBaseQueryService.queryKnowledgeBase(request));
+        return Result.success (queryService.queryKnowledgeBase(request));
     }
 
     /**
      * 基于知识库回答问题（流式 SSE，支持多知识库）。
-     * 受限流保护：全局每分钟 5 次，每 IP 每分钟 5 次。
+     * <p>
+     * ┌─────────────────────────────────────────────────────────────┐
+     * │ 响应格式：Server-Sent Events (SSE)                          │
+     * ├─────────────────────────────────────────────────────────────┤
+     * │ data:回答内容chunk1                                         │
+     * │ data:回答内容chunk2                                         │
+     * │ data:回答内容chunk3                                         │
+     * │ ...                                                         │
+     * │ 前端通过 fetch + ReadableStream 逐块消费                    │
+     * └─────────────────────────────────────────────────────────────┘
+     * <p>
+     * 内部调用 {@link KnowledgeBaseQueryService#answerQuestionStream}，
+     * 包含 Query Rewrite → 向量检索 → LLM 流式生成 → 探测窗口截断。
+     *
+     * @param request 查询请求（知识库 ID 列表 + 问题）
+     * @return SSE 流式响应，每行 data: 后跟一个文本块
      */
     @PostMapping(value = "/api/knowledgebase/query/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> queryKnowledgeBaseStream(@Valid @RequestBody QueryRequest request) {
-        return Flux.empty(); // TODO
+        log.info("收到知识库流式查询请求: kbIds={}, question={}",
+            request.knowledgeBaseIds(), request.question());
+        return queryService.answerQuestionStream(request.knowledgeBaseIds(), request.question());
     }
 
     // ========== 下载 ==========

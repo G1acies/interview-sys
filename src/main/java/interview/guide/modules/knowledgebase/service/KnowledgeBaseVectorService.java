@@ -2,6 +2,7 @@ package interview.guide.modules.knowledgebase.service;
 
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.modules.knowledgebase.listener.VectorizeStreamConsumer;
 import interview.guide.modules.knowledgebase.repository.VectorRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -113,16 +114,58 @@ public class KnowledgeBaseVectorService {
     // ==================================================================
 
     /**
-     * 基于多个知识库进行语义相似度检索。
+     * RAG 的核心检索步骤：语义相似度搜索。
      * <p>
-     * 优先使用 PgVectorStore 的 {@code filterExpression} 做前置过滤，
-     * 如果 pgvector 的 JSON 过滤语法不支持当前表达式，降级为全量检索 + 本地 Java 过滤。
+     * 输入用户的自然语言查询，从 pgvector 中找出语义最相似的文档片段。
+     * 底层由 PgVectorStore 执行 PostgreSQL 的向量距离运算（余弦距离）。
+     * <p>
+     * ┌─────────────────────────────────────────────────────────────────┐
+     * │  执行流程                                                       │
+     * ├─────────────────────────────────────────────────────────────────┤
+     * │ query = "HashMap ConcurrentHashMap 区别对比"                    │
+     * │     + knowledgeBaseIds = [1, 2]  (只搜这两个知识库)             │
+     * │     + topK = 8                   (最多返回 8 条)               │
+     * │     + minScore = 0.28            (相似度低于 0.28 的丢掉)       │
+     * │         │                                                        │
+     * │         ▼                                                        │
+     * │  构建 SearchRequest                                               │
+     * │     ├──  query("HashMap ConcurrentHashMap 区别对比")             │
+     * │     ├──  topK(8)                                                 │
+     * │     ├──  similarityThreshold(0.28)  → 转为余弦距离阈值           │
+     * │     └──  filterExpression("kb_id in ['1','2']")  → 数据库级过滤  │
+     * │         │                                                        │
+     * │         ▼                                                        │
+     * │  PgVectorStore.similaritySearch()                                │
+     * │     ↓ 生成 SQL                                                   │
+     * │  SELECT content, embedding                                        │
+     * │  FROM vector_store                                                │
+     * │  WHERE metadata->>'kb_id' IN ('1','2')                           │
+     * │    AND embedding <=> ? < 0.28    ← 余弦距离筛选                   │
+     * │  ORDER BY embedding <=> ?                                        │
+     * │  LIMIT 8                                                         │
+     * │         │                                                        │
+     * │         ▼                                                        │
+     * │  返回 List<Document> (长度 ≤ 8)                                  │
+     * │  每个 Document 包含:                                              │
+     * │    - getText():      "ConcurrentHashMap 使用 CAS 操作..."        │
+     * │    - getMetadata():  {kb_id=1, ...}                              │
+     * └─────────────────────────────────────────────────────────────────┘
+     * <p>
+     * <b>双路过滤：</b>
+     * <ol>
+     *   <li><b>第一路（优先）：</b>通过 {@code filterExpression} 在 PostgreSQL 内部过滤，
+     *       只从指定知识库的向量中进行检索，高效且精确。</li>
+     *   <li><b>第二路（降级）：</b>如果 pgvector 版本不支持 filterExpression 语法，
+     *       捕获异常后降级为全量检索 + Java 内存过滤。</li>
+     * </ol>
      *
-     * @param query            用户查询文本
-     * @param knowledgeBaseIds 目标知识库 ID 列表（null 或空表示搜索全部）
-     * @param topK             返回的 top-K 条结果
-     * @param minScore         相似度阈值（0~1，0 表示不限制）
-     * @return 匹配的文档片段列表
+     * @param query            用户的自然语言查询（已由 Query Rewrite 改写）
+     * @param knowledgeBaseIds 目标知识库 ID 列表，null 或空 = 搜索全部知识库
+     * @param topK             最多返回多少条结果。实际返回 ≤ topK
+     * @param minScore         最小相似度阈值（范围 0~1），
+     *                         低于此值的文档片段被丢弃。
+     *                         0 表示不设阈值。
+     * @return 匹配的文档片段列表，按相似度降序排列
      */
     public List<Document> similaritySearch(String query, List<Long> knowledgeBaseIds, int topK, double minScore) {
         log.info("向量相似度搜索: query={}, kbIds={}, topK={}, minScore={}",
@@ -133,53 +176,96 @@ public class KnowledgeBaseVectorService {
                 .query(query)
                 .topK(Math.max(topK, 1));
 
+            // 设置相似度阈值：PgVectorStore 内部会将其转为余弦距离
+            // similarityThreshold(0.28) 表示"只返回距离 < 0.28 的结果"
             if (minScore > 0) {
                 builder.similarityThreshold(minScore);
             }
+            // 设置过滤条件：只搜索指定知识库的向量
             if (knowledgeBaseIds != null && !knowledgeBaseIds.isEmpty()) {
                 builder.filterExpression(buildKbFilterExpression(knowledgeBaseIds));
             }
 
+            // 执行向量检索 向量相似度，pgvector来完成
             List<Document> results = vectorStore.similaritySearch(builder.build());
             if (results == null) return List.of();
 
+            // PgVectorStore 可能返回多于 topK 的结果，再在内存中裁剪一次
             List<Document> limited = results.stream().limit(topK).collect(Collectors.toList());
             log.info("搜索完成: 找到 {} 个相关文档", limited.size());
             return limited;
 
         } catch (Exception e) {
+            // filterExpression 在某些 pgvector 版本中可能不兼容
+            // （如 JSON 语法差异），降级到全量检索 + 本地过滤
             log.warn("向量搜索前置过滤失败，回退到本地过滤: {}", e.getMessage());
             return similaritySearchFallback(query, knowledgeBaseIds, topK, minScore);
         }
     }
 
     /**
-     * 降级检索：全量搜索后在 Java 内存中按 kb_id 过滤。
+     * 降级检索策略：当 filterExpression 不兼容时使用。
      * <p>
-     * 考虑到降级后少了数据库过滤，topK 放大 3 倍以覆盖更多候选。
+     * 不做数据库级过滤，而是搜一个更大的结果集回来，
+     * 在 Java 内存中按 {@code kb_id} 做过滤。
+     * <p>
+     * 因为少了数据库过滤，topK 放大 3 倍，确保过滤后还能剩下足够的结果。
+     * <p>
+     * ┌──────────────────────────────────────────────────────┐
+     * │ 主路径（filterExpression 生效）                      │
+     * │   SQL: WHERE kb_id IN (...) AND 距离 < 阈值 LIMIT 8  │
+     * │   精确、高效                                          │
+     * ├──────────────────────────────────────────────────────┤
+     * │ 降级路径（filterExpression 不兼容）                   │
+     * │   SQL: WHERE 距离 < 阈值 LIMIT 24                    │
+     * │   Java: stream().filter(属于指定kb).limit(8)         │
+     * │   功能等价，但多传输了无用的向量数据                    │
+     * └──────────────────────────────────────────────────────┘
+     *
+     * @param query            查询文本
+     * @param knowledgeBaseIds 目标知识库 ID 列表
+     * @param topK             期望返回条数（内部放大 3 倍后传给数据库）
+     * @param minScore         相似度阈值
+     * @return 过滤后的文档片段列表
      */
     private List<Document> similaritySearchFallback(String query, List<Long> knowledgeBaseIds, int topK, double minScore) {
         SearchRequest.Builder builder = SearchRequest.builder()
             .query(query)
+            // 放大 topK 以弥补内存过滤带来的损耗
             .topK(Math.max(topK * 3, topK));
         if (minScore > 0) {
             builder.similarityThreshold(minScore);
         }
 
+        // 全量检索（不限制知识库）
         List<Document> allResults = vectorStore.similaritySearch(builder.build());
         if (allResults == null || allResults.isEmpty()) return List.of();
 
-        // 本地按 kb_id 过滤
+        // 在 Java 内存中按 kb_id 过滤
         if (knowledgeBaseIds != null && !knowledgeBaseIds.isEmpty()) {
             allResults = allResults.stream()
                 .filter(doc -> isDocInKnowledgeBases(doc, knowledgeBaseIds))
                 .collect(Collectors.toList());
         }
 
+        // 裁剪到期望的 topK 数量
         return allResults.stream().limit(topK).collect(Collectors.toList());
     }
 
-    /** 判断一个文档片段是否属于指定知识库之一。 */
+    /**
+     * 判断一个文档片段是否属于指定知识库之一。
+     * <p>
+     * 读取文档在向量化时标记的 {@code kb_id} metadata，
+     * 检查它是否在指定的知识库 ID 列表中。
+     * <p>
+     * 兼容 {@code String} 和 {@code Long} 两种存储类型：
+     * 向量化时存的是 String（{@code toString()}），
+     * 但可能在某些情况下被反序列化为 Long。
+     *
+     * @param doc              文档片段
+     * @param knowledgeBaseIds 目标知识库 ID 列表
+     * @return true 表示该文档属于其中一个指定知识库
+     */
     private boolean isDocInKnowledgeBases(Document doc, List<Long> knowledgeBaseIds) {
         Object kbId = doc.getMetadata().get("kb_id");
         if (kbId == null) return false;
@@ -191,7 +277,17 @@ public class KnowledgeBaseVectorService {
         }
     }
 
-    /** 构建 pgvector filterExpression：kb_id in ['1', '2', '3']。 */
+    /**
+     * 构建 pgvector 的 filterExpression 过滤表达式。
+     * <p>
+     * 生成形如 {@code kb_id in ['1', '2', '3']} 的字符串，
+     * 用于在 PgVectorStore 的 SQL 查询中通过 WHERE 子句过滤知识库。
+     * <p>
+     * {@code kb_id} 对应向量化时每个 chunk 的 metadata 中存的那个字段名。
+     *
+     * @param knowledgeBaseIds 知识库 ID 列表
+     * @return filterExpression 字符串，如 "kb_id in ['1', '2']"
+     */
     private String buildKbFilterExpression(List<Long> knowledgeBaseIds) {
         return knowledgeBaseIds.stream()
             .filter(Objects::nonNull)
