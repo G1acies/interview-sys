@@ -8,6 +8,7 @@ import interview.guide.modules.voice.dto.VoiceInterviewMessageDTO;
 import interview.guide.modules.voice.dto.VoiceSessionMeta;
 import interview.guide.modules.voice.dto.VoiceSessionResponse;
 import interview.guide.modules.voice.service.VoiceInterviewService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -80,9 +81,21 @@ public class VoiceInterviewController {
      * @return 创建的会话详情（含 WebSocket 连接地址）
      */
     @PostMapping("/sessions")
-    public Result<VoiceSessionResponse> createSession(@Valid @RequestBody CreateVoiceSessionRequest request) {
+    public Result<VoiceSessionResponse> createSession(
+            @Valid @RequestBody CreateVoiceSessionRequest request,
+            HttpServletRequest httpRequest) {
         log.info("创建语音面试会话: skillId={}, difficulty={}", request.skillId(), request.difficulty());
-        return Result.success(voiceInterviewService.createSession(request));
+
+        // 从当前 HTTP 请求动态推断 WebSocket URL
+        //   http  → ws://host:port/ws/voice-interview/{sessionId}
+        //   https → wss://host:port/ws/voice-interview/{sessionId}
+        String scheme = httpRequest.getScheme(); // "http" 或 "https"
+        String wsScheme = "https".equals(scheme) ? "wss" : "ws";
+        String host = httpRequest.getServerName();
+        int port = httpRequest.getServerPort();
+        String wsUrlPrefix = String.format("%s://%s:%d/ws/voice-interview", wsScheme, host, port);
+
+        return Result.success(voiceInterviewService.createSession(request, wsUrlPrefix));
     }
 
     /**
