@@ -9,6 +9,8 @@ import interview.guide.modules.voice.model.VoiceInterviewSessionEntity;
 import interview.guide.modules.voice.model.VoiceInterviewSessionEntity.VoiceSessionStatus;
 import interview.guide.modules.voice.repository.VoiceInterviewMessageRepository;
 import interview.guide.modules.voice.repository.VoiceInterviewSessionRepository;
+import interview.guide.modules.voice.service.VoiceAsrService;
+import interview.guide.modules.voice.service.VoiceTtsService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -74,9 +76,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
 
-    // ── ASR/TTS 服务（后续实现时取消注释） ──
-    // private final VoiceAsrService asrService;
-    // private final VoiceTtsService ttsService;
+    private final VoiceAsrService asrService;
+    private final VoiceTtsService ttsService;
 
     /**
      * 活跃的 WebSocket 连接映射表。
@@ -88,6 +89,12 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
      * 如果已有连接存在，旧连接会被主动关闭（防止"一人面试多人听"的混乱局面）。
      */
     private final Map<Long, WebSocketSession> activeSessions = new ConcurrentHashMap<>();
+
+    /**
+     * ASR 连接映射表（sessionId → ASR connectionId）。
+     * 用于在收到音频帧时快速找到对应的 ASR  WebSocket 连接。
+     */
+    private final Map<Long, String> asrConnections = new ConcurrentHashMap<>();
 
     // ==================================================================
     // 连接生命周期回调
@@ -151,9 +158,35 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
         // 4. 保存新连接
         activeSessions.put(sessionId, session);
 
-        // 5. 通知前端 ASR 就绪
-        //    TODO:ASR 如果 ASR 服务连接需要时间，应在此处异步等待 ASR 就绪后再发送
-        sendMessage(session, createControlMessage("asr_ready", "语音识别已就绪，请开始说话"));
+        // 5. 建立 ASR WebSocket 连接（异步连接，连接成功后前端会收到 asr_ready）
+        try {
+            String asrConnectionId = asrService.connectAsr(sessionId, new VoiceAsrService.AsrCallback() {
+                @Override
+                public void onResult(String text, boolean isFinal) {
+                    // ASR 识别结果 → 通过 WebSocket 转发 subtitle 给前端
+                    sendMessage(session, createSubtitleMessage(text, isFinal));
+
+                    if (isFinal && !text.isBlank()) {
+                        log.info("ASR 最终结果，自动提交回答: sessionId={}, text={}",
+                                sessionId, truncate(text, 100));
+                        // isFinal 时自动触发 submit
+                        sendMessage(session, createControlMessage("asr_ready", ""));
+                    }
+                }
+
+                @Override
+                public void onError(String message) {
+                    log.warn("ASR 错误: sessionId={}, error={}", sessionId, message);
+                    sendMessage(session, createErrorMessage("语音识别异常: " + message));
+                }
+            });
+            asrConnections.put(sessionId, asrConnectionId);
+            log.info("ASR 连接已建立: sessionId={}, connectionId={}", sessionId, asrConnectionId);
+        } catch (Exception e) {
+            log.warn("ASR 连接失败（文字模式可用）: sessionId={}, error={}", sessionId, e.getMessage());
+            // ASR 失败不阻断——前端仍可使用文字输入
+            sendMessage(session, createControlMessage("asr_ready", "语音识别暂不可用，请使用文字输入"));
+        }
     }
 
     /**
@@ -216,7 +249,12 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
         // 只清理本连接（避免误删其他同名连接）
         activeSessions.remove(sessionId, session);
 
-        // TODO:ASR 如果 ASR 服务有正在进行的会话，此处应调用 asrService.disconnectAsr(connectionId)
+        // 关闭对应的 ASR 连接
+        String asrConnectionId = asrConnections.remove(sessionId);
+        if (asrConnectionId != null) {
+            asrService.disconnectAsr(asrConnectionId);
+            log.debug("ASR 连接已关闭: sessionId={}", sessionId);
+        }
     }
 
     /**
@@ -234,20 +272,23 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
     // ==================================================================
 
     /**
-     * 处理音频消息（前端麦克风流）。
+     * 处理音频消息（前端麦克风流）——转发给 ASR 服务做实时语音识别。
      * <p>
      * 前端每 200ms 发送一包 PCM 音频数据（16kHz, Int16, Base64 编码）。
-     * 音频数据应转发给 ASR 服务进行实时语音识别。
+     * 音频数据通过 {@link VoiceAsrService#sendAudio} 转发给 DashScope ASR 服务，
+     * ASR 的识别结果通过回调返回，本 Handler 再将结果显示为实时字幕。
      * <p>
-     * TODO:ASR ASR 服务接入后，此方法应：
-     *   <ol>
-     *     <li>将 base64 PCM 解码为 byte[]</li>
-     *     <li>调用 asrService.sendAudio(connectionId, audioBytes)</li>
-     *     <li>ASR 回调 onResult(text, isFinal) 时，通过 WebSocket 发送 subtitle 消息给前端</li>
-     *   </ol>
-     * <p>
-     * 当前实现：由于 ASR 尚未接入，收到音频后仅记录日志，
-     * 并回传一条模拟的 "isFinal" subtitle 作为演示（后续应删除）。
+     * 完整链路：
+     * <pre>
+     * 前端麦克风 → audio 帧
+     *   → handleAudioMessage()
+     *     → asrService.sendAudio(connectionId, base64Data, timestamp)
+     *       → DashScope ASR WebSocket
+     *         ↓ 识别结果回调
+     *       → AsrCallback.onResult(text, isFinal)
+     *         → sendMessage(session, createSubtitleMessage(text, isFinal))
+     *           → 前端 RealtimeSubtitle 展示
+     * </pre>
      *
      * @param sessionId 语音面试会话 ID
      * @param session   WebSocket 会话（用于回传消息）
@@ -262,17 +303,14 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        log.debug("收到音频数据: sessionId={}, size={}, timestamp={}",
-                sessionId, audioData.length(), timestamp);
+        // 查找 ASR 连接并转发音频
+        String connectionId = asrConnections.get(sessionId);
+        if (connectionId == null) {
+            // ASR 未就绪时忽略音频（前端在 isAiSpeaking 或 !isAsrReady 时不会发音频）
+            return;
+        }
 
-        // TODO:ASR ↓↓↓ 接入 ASR 后替换以下代码 ↓↓↓
-        // asrService.sendAudio(connectionId, audioData, timestamp);
-
-        // 当前：模拟 ASR 回显——收到音频后直接返回一条 isFinal=true 的 subtitle
-        // 提示用户输入文字回答（在 ASR 接入前，前端用户需要通过键盘输入文字）
-        String simulatedText = "（语音识别待接入，请使用文字输入）";
-        sendMessage(session, createSubtitleMessage(simulatedText, true));
-        // TODO:ASR ↑↑↑ 接入 ASR 后替换以上代码 ↑↑↑
+        asrService.sendAudio(connectionId, audioData, timestamp);
     }
 
     /**
@@ -367,12 +405,9 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
 
         // 5. 调用 LLM 生成面试官回复
         try {
-            // 构造 AI 回复的提示词
             String aiReplyText = generateAiReply(sessionId, entity, userText);
 
-            // 6. 通过 WebSocket 发送 AI 回复文本给前端
-            //    TODO:TTS TTS 接入后应改为：text + audio_chunk 同时/先后发送
-            //    先发送完整文本通知前端显示，后续 TTS 合成完成后发送 audio_chunk
+            // 6. 先发送 AI 回复文本（让前端立即显示）
             sendMessage(session, createTextMessage(aiReplyText, true));
 
             // 7. 保存 AI 消息到数据库
@@ -390,6 +425,29 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
             // 8. 更新会话的消息计数
             entity.setMessageCount(aiSeq + 1);
             sessionRepository.save(entity);
+
+            // 9. 异步调用 TTS 合成语音
+            final String replyText = aiReplyText;
+            final WebSocketSession wsSession = session;
+            ttsService.synthesizeStream(replyText, new VoiceTtsService.TtsChunkCallback() {
+                @Override
+                public void onChunk(String base64Audio, int index, boolean isLast) {
+                    // 每个音频分块 → audio_chunk 消息 → 前端播放
+                    sendMessage(wsSession, createAudioChunkMessage(base64Audio, index, isLast));
+                }
+
+                @Override
+                public void onComplete() {
+                    log.debug("TTS 合成完成: sessionId={}", sessionId);
+                    sendMessage(wsSession, createControlMessage("audio_complete", ""));
+                }
+
+                @Override
+                public void onError(String message) {
+                    // TTS 失败时音频不会播放，但文本已经发送，不影响体验
+                    log.warn("TTS 合成失败（文本已发送）: sessionId={}, error={}", sessionId, message);
+                }
+            });
 
         } catch (Exception e) {
             log.error("AI 回复生成失败: sessionId={}, error={}", sessionId, e.getMessage(), e);
@@ -542,6 +600,18 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler {
         return jsonMessage("""
                 {"type":"text","content":%s,"final":%b}
                 """.formatted(jsonEscape(content), isFinal));
+    }
+
+    /**
+     * 构造 audio_chunk（音频分块）消息。
+     * <p>
+     * 前端收到后通过 AudioContext 解码并播放。
+     * isLast=true 时前端会等待所有分块播放完毕后调用 finishAiPlayback()。
+     */
+    private String createAudioChunkMessage(String base64Audio, int index, boolean isLast) {
+        return jsonMessage("""
+                {"type":"audio_chunk","data":%s,"index":%d,"isLast":%b}
+                """.formatted(jsonEscape(base64Audio), index, isLast));
     }
 
     /**
