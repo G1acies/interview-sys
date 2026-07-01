@@ -119,7 +119,11 @@ public class VoiceInterviewSessionEntity {
     @Column(name = "pause_reason", length = 100)
     private String pauseReason;
 
-    /** 实际面试时长（秒，不含暂停时间） */
+    /** 累计暂停总时长（秒）。每次 resume 时累加本次暂停时长，end 时用总时长减去它得到实际面试时长 */
+    @Column(name = "total_paused_seconds")
+    private Integer totalPausedSeconds = 0;
+
+    /** 实际面试时长（秒，不含暂停时间）。end 时计算：(endTime - startTime) - totalPausedSeconds */
     @Column(name = "actual_duration")
     private Integer actualDuration;
 

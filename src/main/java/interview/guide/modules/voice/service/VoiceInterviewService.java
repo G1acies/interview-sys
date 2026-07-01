@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.model.AsyncTaskStatus;
+import interview.guide.modules.voice.stream.VoiceEvaluationStreamProducer;
 import interview.guide.modules.interview.service.InterviewSkillService;
 import interview.guide.modules.voice.dto.CreateVoiceSessionRequest;
 import interview.guide.modules.voice.dto.PauseSessionRequest;
@@ -58,10 +59,11 @@ public class VoiceInterviewService {
     private final ChatClient.Builder chatClientBuilder;
     private final ObjectMapper objectMapper;
 
+    private final VoiceEvaluationStreamProducer evaluationStreamProducer;
+
     // 子服务（后续实现时取消注释）
     // private final VoiceAsrService asrService;
     // private final VoiceTtsService ttsService;
-    // private final VoiceEvaluationService evaluationService;
 
     // ==================================================================
     // 常量
@@ -429,10 +431,13 @@ public class VoiceInterviewService {
         entity.setStatus(VoiceSessionStatus.COMPLETED);
         entity.setEndTime(now);
 
-        // 计算实际面试时长（秒）
+        // 计算实际面试时长（秒）= 总耗时 - 累计暂停时长
         if (entity.getStartTime() != null) {
-            long seconds = java.time.Duration.between(entity.getStartTime(), now).getSeconds();
-            entity.setActualDuration((int) Math.max(0, seconds));
+            long totalSeconds = java.time.Duration.between(entity.getStartTime(), now).getSeconds();
+            int paused = entity.getTotalPausedSeconds() != null ? entity.getTotalPausedSeconds() : 0;
+            entity.setActualDuration((int) Math.max(0, totalSeconds - paused));
+            log.debug("时长计算: sessionId={}, 总耗时={}s, 暂停={}s, 实际={}s",
+                    sessionId, totalSeconds, paused, entity.getActualDuration());
         }
 
         sessionRepository.save(entity);
@@ -459,7 +464,7 @@ public class VoiceInterviewService {
     /**
      * 暂停语音面试会话。
      * <p>
-     * 仅 IN_PROGRESS 状态的会话可以暂停。记录暂停时间和原因。
+     * 仅 IN_PROGRESS 状态的会话可以暂停。记录暂停时间，供 resume 时计算本次暂停时长。
      *
      * @param sessionId 会话 ID
      * @param request   暂停信息（含 reason，可为 null）
@@ -485,7 +490,9 @@ public class VoiceInterviewService {
     /**
      * 恢复已暂停的语音面试会话。
      * <p>
-     * 仅 PAUSED 状态的会话可以恢复。清空暂停标记并构造新的 WebSocket 地址。
+     * 仅 PAUSED 状态的会话可以恢复。恢复时计算本次暂停的持续秒数，
+     * 累加到 {@code totalPausedSeconds} 中，供 end 时计算实际面试时长。
+     * 清空暂停标记并构造新的 WebSocket 地址。
      *
      * @param sessionId   会话 ID
      * @param wsUrlPrefix WebSocket URL 前缀（由 Controller 从 HttpServletRequest 推断）
@@ -499,6 +506,15 @@ public class VoiceInterviewService {
         if (entity.getStatus() != VoiceSessionStatus.PAUSED) {
             throw new BusinessException(ErrorCode.BAD_REQUEST,
                     "只有已暂停的会话才能恢复，当前状态: " + entity.getStatus());
+        }
+
+        // 累加本次暂停时长（秒）
+        if (entity.getPausedAt() != null) {
+            long pausedSeconds = java.time.Duration.between(entity.getPausedAt(), LocalDateTime.now()).getSeconds();
+            int total = (entity.getTotalPausedSeconds() != null ? entity.getTotalPausedSeconds() : 0)
+                    + (int) Math.max(0, pausedSeconds);
+            entity.setTotalPausedSeconds(total);
+            log.debug("累加暂停时长: sessionId={}, 本次={}s, 累计={}s", sessionId, pausedSeconds, total);
         }
 
         entity.setStatus(VoiceSessionStatus.IN_PROGRESS);
@@ -565,22 +581,43 @@ public class VoiceInterviewService {
     }
 
     /**
-     * 触发异步面试评估。
+     * 触发异步面试评估——通过 Redis Stream 异步执行。
      * <p>
-     * 简单实现：将评估状态设为 PENDING 后返回。
-     * 实际的异步 LLM 评估逻辑待后续接入。
+     * 核心流程：
+     * <ol>
+     *   <li>校验会话存在</li>
+     *   <li>幂等保护：如果已经是 PROCESSING，直接返回当前状态（不重复触发）</li>
+     *   <li>设置 evaluateStatus = PENDING，持久化</li>
+     *   <li>通过 {@link VoiceEvaluationStreamProducer} 发送消息到 Redis Stream</li>
+     *   <li>Stream 消费者在后台拾取消息，异步执行评估</li>
+     *   <li>返回当前状态（前端通过 GET /evaluation 轮询直到 COMPLETED）</li>
+     * </ol>
+     * <p>
+     * 异步链路：
+     * <pre>
+     * 本方法 → Redis Stream (voice:evaluation:stream)
+     *   → VoiceEvaluationStreamConsumer （后台守护线程）
+     *     → VoiceEvaluationService.evaluate(sessionId)
+     *       → 写回 evaluationJson + evaluateStatus = COMPLETED
+     * </pre>
      *
      * @param sessionId 会话 ID
-     * @return 当前评估状态
+     * @return 当前评估状态（PENDING）
      * @throws BusinessException 会话不存在时抛出
      */
     @Transactional
     public VoiceEvaluationStatusResponse triggerEvaluation(Long sessionId) {
         VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
 
-        // 已经在处理中 → 不重复触发
+        // 已经在处理中 → 幂等，不重复触发
         if (entity.getEvaluateStatus() == AsyncTaskStatus.PROCESSING) {
             log.info("评估已在处理中，跳过: sessionId={}", sessionId);
+            return getEvaluation(sessionId);
+        }
+
+        // 已经是 COMPLETED → 直接返回结果
+        if (entity.getEvaluateStatus() == AsyncTaskStatus.COMPLETED) {
+            log.info("评估已完成，直接返回: sessionId={}", sessionId);
             return getEvaluation(sessionId);
         }
 
@@ -589,10 +626,10 @@ public class VoiceInterviewService {
         entity.setEvaluateError(null);
         sessionRepository.save(entity);
 
-        // TODO: 后续通过 @Async 或 TaskExecutor 异步调用
-        //   evaluationService.evaluate(sessionId) → 完成后更新 COMPLETED + evaluationJson
+        // 发送消息到 Redis Stream（生产者内部已确保消费者组存在）
+        evaluationStreamProducer.publish(sessionId);
 
-        log.info("语音面试评估已触发: sessionId={}", sessionId);
+        log.info("语音面试评估已触发（Redis Stream）: sessionId={}", sessionId);
         return getEvaluation(sessionId);
     }
 
