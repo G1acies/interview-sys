@@ -28,4 +28,9 @@ public interface VoiceInterviewMessageRepository extends JpaRepository<VoiceInte
      * 统计某会话的消息总数。
      */
     int countBySessionId(Long sessionId);
+
+    /**
+     * 删除某会话的所有消息（级联删除用）。
+     */
+    void deleteBySessionId(Long sessionId);
 }

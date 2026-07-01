@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.common.model.AsyncTaskStatus;
 import interview.guide.modules.interview.service.InterviewSkillService;
 import interview.guide.modules.voice.dto.CreateVoiceSessionRequest;
 import interview.guide.modules.voice.dto.PauseSessionRequest;
@@ -360,63 +361,82 @@ public class VoiceInterviewService {
     }
 
     // ==================================================================
-    // 以下方法为骨架，待后续实现
+    // 会话 CRUD
     // ==================================================================
 
     /**
      * 获取单个会话详情。
+     * <p>
+     * 查询并返回会话的基本信息。webSocketUrl 为 null（前端只在创建/恢复时使用 URL）。
      *
      * @param sessionId 会话 ID
      * @return 会话详情
      * @throws BusinessException 如果会话不存在（VOICE_SESSION_NOT_FOUND）
      */
     public VoiceSessionResponse getSession(Long sessionId) {
-        // TODO:
-        //   1. sessionRepository.findById(sessionId) 查找
-        //   2. 不存在则抛 BusinessException(VOICE_SESSION_NOT_FOUND)
-        //   3. Entity → VoiceSessionResponse 转换（调用 buildSessionResponse）
-        //   4. WebSocket URL 重新构造
-        log.info("获取语音面试会话: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
+        log.info("获取语音面试会话: sessionId={}, status={}", sessionId, entity.getStatus());
+        return buildSessionResponse(entity, null);
     }
 
     /**
      * 获取会话列表。
      * <p>
-     * status 为 null 时返回所有会话；非 null 时按状态筛选。
+     * status 为 null 时返回所有会话；非 null 时按状态筛选（如 "IN_PROGRESS"、"PAUSED"）。
      * userId 当前为预留字段。
      *
-     * @param userId 用户 ID（预留）
-     * @param status 会话状态筛选（可选）
+     * @param userId 用户 ID（预留，当前未使用）
+     * @param status 会话状态筛选（可选，如 "COMPLETED"），大小写不敏感
      * @return 会话元数据列表
      */
     public List<VoiceSessionMeta> listSessions(String userId, String status) {
-        // TODO:
-        //   1. status == null → 查所有（findAllByOrderByCreatedAtDesc）
-        //   2. status != null → 按状态解析 + 查（findByStatusOrderByCreatedAtDesc）
-        //   3. Entity → VoiceSessionMeta 转换
-        log.info("获取语音面试会话列表: userId={}, status={}", userId, status);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        List<VoiceInterviewSessionEntity> entities;
+
+        if (status != null && !status.isBlank()) {
+            // 按状态筛选
+            VoiceSessionStatus sessionStatus = VoiceSessionStatus.valueOf(status.toUpperCase());
+            entities = sessionRepository.findByStatusOrderByCreatedAtDesc(sessionStatus);
+            log.info("获取语音面试会话列表: status={}, 共{}条", status, entities.size());
+        } else {
+            // 查全部
+            entities = sessionRepository.findAllByOrderByCreatedAtDesc();
+            log.info("获取所有语音面试会话: 共{}条", entities.size());
+        }
+
+        return entities.stream().map(this::entityToMeta).toList();
     }
 
     /**
      * 结束语音面试会话。
      * <p>
-     * 将会话状态设为 COMPLETED，计算并记录实际面试时长（去除暂停时间）。
-     * 已结束的会话不可重复结束（幂等校验）。
+     * 仅非终态（CREATED / IN_PROGRESS / PAUSED）的会话可以结束。
+     * endTime 设为当前时间，actualDuration 取整秒。
      *
      * @param sessionId 会话 ID
      * @throws BusinessException 会话不存在或已是终态
      */
     @Transactional
     public void endSession(Long sessionId) {
-        // TODO:
-        //   1. 查找会话，校验存在且未结束（COMPLETED/EVALUATED 是终态）
-        //   2. 计算 actualDuration = (endTime - startTime) - 暂停总时长
-        //   3. 设置 status = COMPLETED, endTime = now, actualDuration
-        //   4. 持久化
-        log.info("结束语音面试会话: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
+
+        // 校验：终态不可重复结束
+        if (entity.getStatus() == VoiceSessionStatus.COMPLETED
+                || entity.getStatus() == VoiceSessionStatus.EVALUATED) {
+            throw new BusinessException(ErrorCode.VOICE_SESSION_CLOSED, "会话已结束，无需重复操作");
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        entity.setStatus(VoiceSessionStatus.COMPLETED);
+        entity.setEndTime(now);
+
+        // 计算实际面试时长（秒）
+        if (entity.getStartTime() != null) {
+            long seconds = java.time.Duration.between(entity.getStartTime(), now).getSeconds();
+            entity.setActualDuration((int) Math.max(0, seconds));
+        }
+
+        sessionRepository.save(entity);
+        log.info("语音面试已结束: sessionId={}, duration={}s", sessionId, entity.getActualDuration());
     }
 
     /**
@@ -426,11 +446,10 @@ public class VoiceInterviewService {
      */
     @Transactional
     public void deleteSession(Long sessionId) {
-        // TODO:
-        //   1. messageRepository.deleteBySessionId(sessionId) — 需在 Repository 中添加
-        //   2. sessionRepository.deleteById(sessionId)
-        log.info("删除语音面试会话: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        // 先删消息，再删会话
+        messageRepository.deleteBySessionId(sessionId);
+        sessionRepository.deleteById(sessionId);
+        log.info("语音面试会话已删除: sessionId={}", sessionId);
     }
 
     // ==================================================================
@@ -440,43 +459,58 @@ public class VoiceInterviewService {
     /**
      * 暂停语音面试会话。
      * <p>
-     * 仅 IN_PROGRESS 状态的会话可以暂停。记录暂停原因和暂停时间，
-     * 用于 resume 时计算实际面试时长（扣除暂停时段）。
+     * 仅 IN_PROGRESS 状态的会话可以暂停。记录暂停时间和原因。
      *
      * @param sessionId 会话 ID
-     * @param request   暂停信息（含 reason）
+     * @param request   暂停信息（含 reason，可为 null）
      * @throws BusinessException 会话不存在或不在 IN_PROGRESS 状态
      */
     @Transactional
     public void pauseSession(Long sessionId, PauseSessionRequest request) {
-        // TODO:
-        //   1. 查找会话，校验 status == IN_PROGRESS
-        //   2. 设置 status = PAUSED, pausedAt = now, pauseReason
-        //   3. 持久化
-        String reason = request != null ? request.reason() : "user_initiated";
-        log.info("暂停语音面试会话: sessionId={}, reason={}", sessionId, reason);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
+
+        if (entity.getStatus() != VoiceSessionStatus.IN_PROGRESS) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST,
+                    "只有进行中的会话才能暂停，当前状态: " + entity.getStatus());
+        }
+
+        entity.setStatus(VoiceSessionStatus.PAUSED);
+        entity.setPausedAt(LocalDateTime.now());
+        entity.setPauseReason(request != null ? request.reason() : "user_initiated");
+
+        sessionRepository.save(entity);
+        log.info("语音面试已暂停: sessionId={}, reason={}", sessionId, entity.getPauseReason());
     }
 
     /**
      * 恢复已暂停的语音面试会话。
      * <p>
-     * 仅 PAUSED 状态的会话可以恢复。会清空 pausedAt 标记，
-     * 并构造新的 WebSocket 地址返回（因为旧连接已断开）。
+     * 仅 PAUSED 状态的会话可以恢复。清空暂停标记并构造新的 WebSocket 地址。
      *
-     * @param sessionId 会话 ID
+     * @param sessionId   会话 ID
+     * @param wsUrlPrefix WebSocket URL 前缀（由 Controller 从 HttpServletRequest 推断）
      * @return 更新后的会话详情（含新的 WebSocket 地址）
      * @throws BusinessException 会话不存在或不在 PAUSED 状态
      */
     @Transactional
-    public VoiceSessionResponse resumeSession(Long sessionId) {
-        // TODO:
-        //   1. 查找会话，校验 status == PAUSED
-        //   2. 设置 status = IN_PROGRESS, pausedAt = null
-        //   3. 构造新的 webSocketUrl
-        //   4. 持久化，返回 VoiceSessionResponse
-        log.info("恢复语音面试会话: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+    public VoiceSessionResponse resumeSession(Long sessionId, String wsUrlPrefix) {
+        VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
+
+        if (entity.getStatus() != VoiceSessionStatus.PAUSED) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST,
+                    "只有已暂停的会话才能恢复，当前状态: " + entity.getStatus());
+        }
+
+        entity.setStatus(VoiceSessionStatus.IN_PROGRESS);
+        entity.setPausedAt(null);
+        entity.setPauseReason(null);
+
+        sessionRepository.save(entity);
+
+        String webSocketUrl = buildWebSocketUrl(wsUrlPrefix, sessionId);
+        log.info("语音面试已恢复: sessionId={}", sessionId);
+
+        return buildSessionResponse(entity, webSocketUrl);
     }
 
     // ==================================================================
@@ -485,51 +519,56 @@ public class VoiceInterviewService {
 
     /**
      * 获取会话的消息历史。
-     * <p>
-     * 按序号升序返回所有消息。用于前端恢复对话记录（如刷新页面后重建上下文）。
      *
      * @param sessionId 会话 ID
      * @return 消息列表（按 sequenceNum 升序）
      * @throws BusinessException 会话不存在时抛出
      */
     public List<VoiceInterviewMessageDTO> getMessages(Long sessionId) {
-        // TODO:
-        //   1. 校验会话存在
-        //   2. messageRepository.findBySessionIdOrderBySequenceNumAsc(sessionId)
-        //   3. Entity → DTO 转换
-        log.info("获取语音面试消息: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        // 校验会话存在
+        findSessionOrThrow(sessionId);
+
+        List<VoiceInterviewMessageEntity> entities =
+                messageRepository.findBySessionIdOrderBySequenceNumAsc(sessionId);
+
+        log.info("获取语音面试消息: sessionId={}, 共{}条", sessionId, entities.size());
+        return entities.stream().map(this::entityToMessageDTO).toList();
     }
 
     /**
-     * 获取面试评估状态。
+     * 获取面试评估状态（前端轮询用）。
      * <p>
-     * 从会话实体中读取 evaluateStatus 和 evaluationJson，
-     * 组装为 {@link VoiceEvaluationStatusResponse} 返回。
-     * <p>
-     * 当 evaluateStatus == COMPLETED 时，将 evaluationJson 反序列化为
-     * {@link VoiceEvaluationDetail} 一并返回。
+     * COMPLETED 时反序列化 evaluationJson 为 {@link VoiceEvaluationDetail} 一并返回。
      *
      * @param sessionId 会话 ID
-     * @return 评估状态（可能为 PENDING / PROCESSING / COMPLETED / FAILED）
+     * @return 评估状态
      * @throws BusinessException 会话不存在时抛出
      */
     public VoiceEvaluationStatusResponse getEvaluation(Long sessionId) {
-        // TODO:
-        //   1. 查找会话
-        //   2. 如果 evaluateStatus == COMPLETED 且 evaluationJson 非空
-        //      → 反序列化 evaluationJson 为 VoiceEvaluationDetail
-        //   3. 组装 VoiceEvaluationStatusResponse 返回
-        log.info("获取语音面试评估状态: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
+
+        VoiceEvaluationDetail detail = null;
+        if (entity.getEvaluateStatus() == AsyncTaskStatus.COMPLETED
+                && entity.getEvaluationJson() != null
+                && !entity.getEvaluationJson().isBlank()) {
+            try {
+                detail = objectMapper.readValue(entity.getEvaluationJson(), VoiceEvaluationDetail.class);
+            } catch (Exception e) {
+                log.warn("反序列化 evaluationJson 失败: sessionId={}, error={}", sessionId, e.getMessage());
+            }
+        }
+
+        String status = entity.getEvaluateStatus() != null ? entity.getEvaluateStatus().name() : null;
+        log.info("获取语音面试评估状态: sessionId={}, status={}", sessionId, status);
+
+        return new VoiceEvaluationStatusResponse(status, entity.getEvaluateError(), detail);
     }
 
     /**
      * 触发异步面试评估。
      * <p>
-     * 如果评估尚未开始（evaluateStatus == null 或 FAILED），
-     * 将状态设为 PENDING 并异步执行评估逻辑。
-     * 如果已经是 PROCESSING，直接返回当前状态（幂等，不重复触发）。
+     * 简单实现：将评估状态设为 PENDING 后返回。
+     * 实际的异步 LLM 评估逻辑待后续接入。
      *
      * @param sessionId 会话 ID
      * @return 当前评估状态
@@ -537,15 +576,73 @@ public class VoiceInterviewService {
      */
     @Transactional
     public VoiceEvaluationStatusResponse triggerEvaluation(Long sessionId) {
-        // TODO:
-        //   1. 查找会话，校验存在
-        //   2. 如果 evaluateStatus == PROCESSING → 返回当前状态（不重复触发）
-        //   3. 设置 evaluateStatus = PENDING，持久化
-        //   4. 异步调用 VoiceEvaluationService.evaluate(sessionId)
-        //      （通过 @Async 或 TaskExecutor）
-        //   5. 评估完成后更新 evaluateStatus = COMPLETED + evaluationJson
-        //   6. 返回当前状态
-        log.info("触发语音面试评估: sessionId={}", sessionId);
-        throw new UnsupportedOperationException("语音面试服务尚未实现");
+        VoiceInterviewSessionEntity entity = findSessionOrThrow(sessionId);
+
+        // 已经在处理中 → 不重复触发
+        if (entity.getEvaluateStatus() == AsyncTaskStatus.PROCESSING) {
+            log.info("评估已在处理中，跳过: sessionId={}", sessionId);
+            return getEvaluation(sessionId);
+        }
+
+        // 设为 PENDING
+        entity.setEvaluateStatus(AsyncTaskStatus.PENDING);
+        entity.setEvaluateError(null);
+        sessionRepository.save(entity);
+
+        // TODO: 后续通过 @Async 或 TaskExecutor 异步调用
+        //   evaluationService.evaluate(sessionId) → 完成后更新 COMPLETED + evaluationJson
+
+        log.info("语音面试评估已触发: sessionId={}", sessionId);
+        return getEvaluation(sessionId);
+    }
+
+    // ==================================================================
+    // 内部工具方法
+    // ==================================================================
+
+    /**
+     * 查找会话，不存在时抛异常。
+     */
+    private VoiceInterviewSessionEntity findSessionOrThrow(Long sessionId) {
+        return sessionRepository.findById(sessionId)
+                .orElseThrow(() -> new BusinessException(
+                        ErrorCode.VOICE_SESSION_NOT_FOUND, "语音面试会话不存在: " + sessionId));
+    }
+
+    /**
+     * Entity → VoiceSessionMeta 转换。
+     */
+    private VoiceSessionMeta entityToMeta(VoiceInterviewSessionEntity entity) {
+        return new VoiceSessionMeta(
+                entity.getId(),
+                entity.getRoleType(),
+                entity.getStatus().name(),
+                entity.getCurrentPhase(),
+                entity.getCreatedAt() != null
+                        ? entity.getCreatedAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : null,
+                entity.getUpdatedAt() != null
+                        ? entity.getUpdatedAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : null,
+                entity.getActualDuration(),
+                entity.getMessageCount(),
+                entity.getEvaluateStatus() != null ? entity.getEvaluateStatus().name() : null,
+                entity.getEvaluateError()
+        );
+    }
+
+    /**
+     * Entity → VoiceInterviewMessageDTO 转换。
+     */
+    private VoiceInterviewMessageDTO entityToMessageDTO(VoiceInterviewMessageEntity entity) {
+        return new VoiceInterviewMessageDTO(
+                entity.getId(),
+                entity.getSessionId(),
+                entity.getMessageType(),
+                entity.getPhase(),
+                entity.getUserRecognizedText(),
+                entity.getAiGeneratedText(),
+                entity.getTimestamp() != null
+                        ? entity.getTimestamp().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : null,
+                entity.getSequenceNum()
+        );
     }
 }

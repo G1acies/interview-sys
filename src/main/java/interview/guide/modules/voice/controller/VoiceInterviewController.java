@@ -185,9 +185,16 @@ public class VoiceInterviewController {
      * @return 更新后的会话详情
      */
     @PutMapping("/sessions/{sessionId}/resume")
-    public Result<VoiceSessionResponse> resumeSession(@PathVariable Long sessionId) {
+    public Result<VoiceSessionResponse> resumeSession(
+            @PathVariable Long sessionId,
+            HttpServletRequest httpRequest) {
         log.info("恢复语音面试会话: sessionId={}", sessionId);
-        return Result.success(voiceInterviewService.resumeSession(sessionId));
+
+        String wsScheme = "https".equals(httpRequest.getScheme()) ? "wss" : "ws";
+        String wsUrlPrefix = String.format("%s://%s:%d/ws/voice-interview",
+                wsScheme, httpRequest.getServerName(), httpRequest.getServerPort());
+
+        return Result.success(voiceInterviewService.resumeSession(sessionId, wsUrlPrefix));
     }
 
     // ==================================================================
