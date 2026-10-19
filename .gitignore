@@ -4,6 +4,8 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/
 !**/src/test/**/build/
+FRONTEND_API.md
+INTERVIEW_GUIDE.md
 
 ### STS ###
 .apt_generated
