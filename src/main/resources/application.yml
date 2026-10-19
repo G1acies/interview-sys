@@ -55,7 +55,7 @@ spring:
   # Spring AI — DashScope (OpenAI 兼容)
   ai:
     openai:
-      api-key: ${AI_BAILIAN_API_KEY:***REMOVED***}
+      api-key: ${AI_BAILIAN_API_KEY}
       base-url: https://dashscope.aliyuncs.com/compatible-mode
       chat:
         options:

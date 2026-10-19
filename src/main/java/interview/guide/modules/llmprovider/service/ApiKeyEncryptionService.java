@@ -48,7 +48,7 @@ public class ApiKeyEncryptionService {
     /**
      * 脱敏 API Key：只保留前几位和后几位，中间用 **** 替代。
      * <p>
-     * 如 "***REMOVED***" → "sk-22****a42"。
+     * 如 "sk-abcd1234****wxyz" → "sk-abc****xyz"。
      *
      * @param rawKey 原始 API Key
      * @return 脱敏后的字符串
