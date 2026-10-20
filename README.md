@@ -240,10 +240,7 @@ pnpm build
 | 面试日程 | `/api/interview-schedule` |
 | LLM Provider | `/api/llm-provider` |
 
-完整接口说明见：
-
-- Swagger UI：`http://localhost:8080/swagger-ui.html`
-- 前端联调文档：[FRONTEND_API.md](FRONTEND_API.md)
+完整接口说明见 Swagger UI：`http://localhost:8080/swagger-ui.html`
 
 ## 配置说明
 
@@ -264,3 +261,7 @@ pnpm build
 - LLM Provider 的 API Key 以 Base64 编码存储，仅用于开发演示；生产环境应改用 AES-GCM 等加密方案。
 - 文件上传大小受 `spring.servlet.multipart.max-file-size`（20 MB）限制，知识库服务自身校验上限为 50 MB。
 - 知识库向量化与语音面试评估均为 Redis Stream 异步任务，需保证 Redis 可用。
+
+## License
+
+本项目基于 [MIT License](LICENSE) 开源。
